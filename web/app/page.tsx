@@ -1,0 +1,404 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+const API = process.env.NEXT_PUBLIC_CRASHLAB_API ?? "http://127.0.0.1:8080";
+
+type Service = {
+  name: string;
+  dependsOn: string[];
+  health: string;
+  status: string;
+  ports: string[];
+  restartCount: number;
+};
+
+type Experiment = {
+  id: number;
+  name: string;
+  status: string;
+  phase: string;
+  target: string;
+  delayMs: number;
+  baselineMs: number;
+  durationMs: number;
+  recoveryMs: number;
+  entryUrl: string;
+  entryService: string;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+};
+
+type EventRow = { id: number; at: string; kind: string; service: string; message: string };
+type Bucket = { t: string; p95: number; errorRate: number };
+type Window = { p50: number; p95: number; errorRate: number; count: number };
+type Result = {
+  baseline: Window;
+  failure: Window;
+  recovery: Window;
+  recoveryMs: number | null;
+  degraded: boolean;
+  conclusion: string;
+  propagation: Array<{ service: string; at: string; reason: string }>;
+  retryFactor: number;
+  text: string;
+};
+
+type Snapshot = {
+  experiment: Experiment | null;
+  topology: { project: string; services: Service[] };
+  events: EventRow[];
+  nodeStates: Record<string, string>;
+  buckets: Bucket[];
+  result: Result | null;
+  recent: Experiment[];
+  warning?: string;
+};
+
+const empty: Snapshot = {
+  experiment: null,
+  topology: { project: "", services: [] },
+  events: [],
+  nodeStates: {},
+  buckets: [],
+  result: null,
+  recent: [],
+};
+
+export default function Page() {
+  const [snap, setSnap] = useState<Snapshot>(empty);
+  const [target, setTarget] = useState("payment-service");
+  const [delayMs, setDelayMs] = useState(800);
+  const [baselineS, setBaselineS] = useState(15);
+  const [durationS, setDurationS] = useState(30);
+  const [recoveryS, setRecoveryS] = useState(15);
+  const [entryUrl, setEntryUrl] = useState("http://127.0.0.1:8081/checkout");
+  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState("");
+
+  const load = useCallback(async (id?: number) => {
+    const url = id ? `${API}/api/experiments/${id}` : `${API}/api/experiments`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(body.error ?? res.statusText);
+    }
+    const data = (await res.json()) as Snapshot;
+    setSnap(data);
+    return data;
+  }, []);
+
+  useEffect(() => {
+    load().catch((err: Error) => setFormError(err.message));
+  }, [load]);
+
+  const running = snap.experiment?.status === "running";
+  const experimentId = snap.experiment?.id;
+
+  useEffect(() => {
+    if (!running || !experimentId) return;
+    const source = new EventSource(`${API}/api/experiments/${experimentId}/stream`);
+    source.onmessage = (event) => {
+      setSnap(JSON.parse(event.data) as Snapshot);
+    };
+    source.onerror = () => {
+      source.close();
+      load(experimentId).catch(() => undefined);
+    };
+    return () => source.close();
+  }, [running, experimentId, load]);
+
+  async function startExperiment() {
+    setBusy(true);
+    setFormError("");
+    try {
+      const res = await fetch(`${API}/api/experiments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: `${target}-latency`,
+          target,
+          delayMs,
+          baselineMs: baselineS * 1000,
+          durationMs: durationS * 1000,
+          recoveryMs: recoveryS * 1000,
+          entryUrl,
+          entryService: "storefront",
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "could not start");
+      await load(body.id);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "could not start");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const services = snap.topology.services ?? [];
+  const phase = snap.experiment ? `${snap.experiment.status} · ${snap.experiment.phase}` : "idle";
+  const faultVisible = !!snap.experiment && !["setup", "baseline"].includes(snap.experiment.phase);
+
+  return (
+    <main className="app">
+      <header>
+        <div>
+          <div className="mark">CrashLab</div>
+          <h1>{snap.experiment?.name ?? "Latency experiment"}</h1>
+        </div>
+        <div className="status">
+          <span className={`dot ${snap.experiment?.status ?? ""}`} />
+          {phase}
+        </div>
+      </header>
+      <div className="layout">
+        <section className="stack">
+          <div className="panel">
+            <h2>Experiment</h2>
+            {formError ? <p className="err">{formError}</p> : null}
+            {snap.warning ? <p className="warn">{snap.warning}</p> : null}
+            <div className="form">
+              <label className="wide">
+                Target
+                <select value={target} onChange={(e) => setTarget(e.target.value)}>
+                  {(services.length ? services : [{ name: "payment-service" }]).map((svc) => (
+                    <option key={svc.name} value={svc.name}>{svc.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Delay (ms)
+                <input type="number" min={1} value={delayMs} onChange={(e) => setDelayMs(Number(e.target.value))} />
+              </label>
+              <label>
+                Baseline (s)
+                <input type="number" min={1} value={baselineS} onChange={(e) => setBaselineS(Number(e.target.value))} />
+              </label>
+              <label>
+                Fault (s)
+                <input type="number" min={1} value={durationS} onChange={(e) => setDurationS(Number(e.target.value))} />
+              </label>
+              <label>
+                Recovery (s)
+                <input type="number" min={1} value={recoveryS} onChange={(e) => setRecoveryS(Number(e.target.value))} />
+              </label>
+              <label className="wide">
+                Entry URL
+                <input value={entryUrl} onChange={(e) => setEntryUrl(e.target.value)} />
+              </label>
+            </div>
+            <button disabled={busy || running} onClick={startExperiment}>
+              {running ? "Running" : "Run experiment"}
+            </button>
+            {snap.recent?.length ? (
+              <div className="recent">
+                {snap.recent.map((exp) => (
+                  <button key={exp.id} onClick={() => load(exp.id).catch((err: Error) => setFormError(err.message))}>
+                    #{String(exp.id).padStart(3, "0")} {exp.status}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="panel">
+            <h2>Service graph</h2>
+            <ServiceGraph services={services} states={snap.nodeStates ?? {}} fault={faultVisible ? snap.experiment?.target : undefined} />
+          </div>
+        </section>
+        <section className="stack">
+          <div className="panel">
+            <h2>p95 latency</h2>
+            <LatencyChart
+              buckets={snap.buckets ?? []}
+              events={snap.events ?? []}
+              startedAt={snap.experiment?.startedAt}
+            />
+          </div>
+          <div className="panel">
+            <h2>Event timeline</h2>
+            <Timeline events={snap.events ?? []} startedAt={snap.experiment?.startedAt} />
+          </div>
+          <div className="panel">
+            <h2>Report</h2>
+            {snap.experiment?.error ? <p className="err">{snap.experiment.error}</p> : null}
+            <Report result={snap.result} />
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function ServiceGraph({ services, states, fault }: { services: Service[]; states: Record<string, string>; fault?: string }) {
+  const layout = useMemo(() => place(services), [services]);
+  if (!services.length) {
+    return <p className="warn">No running Compose services. Start the demo with docker compose up.</p>;
+  }
+  const width = 360;
+  const height = Math.max(layout.rows, 1) * 92 + 16;
+  return (
+    <svg className="graph" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Service dependency graph">
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6" fill="#8ea394" />
+        </marker>
+      </defs>
+      {services.flatMap((svc) =>
+        (svc.dependsOn ?? []).map((dep) => {
+          const from = layout.pos.get(svc.name);
+          const to = layout.pos.get(dep);
+          if (!from || !to) return null;
+          return (
+            <line
+              key={`${svc.name}-${dep}`}
+              x1={from.x}
+              y1={from.y + 24}
+              x2={to.x}
+              y2={to.y - 24}
+              stroke="#8ea394"
+              strokeWidth="1.2"
+              markerEnd="url(#arrow)"
+            />
+          );
+        }),
+      )}
+      {services.map((svc) => {
+        const pos = layout.pos.get(svc.name);
+        if (!pos) return null;
+        const state = states[svc.name] ?? (svc.name === fault ? "fault" : "healthy");
+        const color = state === "fault" ? "#ff5a36" : state === "degraded" ? "#e6a23c" : "#8fce7a";
+        return (
+          <g key={svc.name} transform={`translate(${pos.x - 78}, ${pos.y - 24})`}>
+            <rect width="156" height="48" rx="6" fill="#10140f" stroke={color} strokeWidth="1.5" />
+            <text className="node-name" x="78" y="20" textAnchor="middle" fill="#e4efe4">{svc.name}</text>
+            <text className="node-state" x="78" y="36" textAnchor="middle" fill={color}>{state}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function place(services: Service[]) {
+  const memo = new Map<string, number>();
+  const rankOf = (name: string, seen: Set<string>): number => {
+    const cached = memo.get(name);
+    if (cached !== undefined) return cached;
+    if (seen.has(name)) return 0;
+    seen.add(name);
+    const parents = services.filter((svc) => (svc.dependsOn ?? []).includes(name)).map((svc) => svc.name);
+    const rank = parents.length ? 1 + Math.max(...parents.map((parent) => rankOf(parent, seen))) : 0;
+    seen.delete(name);
+    memo.set(name, rank);
+    return rank;
+  };
+  const groups = new Map<number, string[]>();
+  let rows = 1;
+  for (const svc of services) {
+    const rank = rankOf(svc.name, new Set());
+    rows = Math.max(rows, rank + 1);
+    const list = groups.get(rank) ?? [];
+    list.push(svc.name);
+    groups.set(rank, list);
+  }
+  const pos = new Map<string, { x: number; y: number }>();
+  for (const [rank, names] of groups) {
+    names.sort();
+    names.forEach((name, index) => {
+      const x = ((index + 1) / (names.length + 1)) * 360;
+      pos.set(name, { x, y: 36 + rank * 92 });
+    });
+  }
+  return { pos, rows };
+}
+
+function LatencyChart({ buckets, events, startedAt }: { buckets: Bucket[]; events: EventRow[]; startedAt?: string }) {
+  if (!buckets.length || !startedAt) {
+    return <p className="warn">Latency appears once the load generator records requests.</p>;
+  }
+  const start = Date.parse(startedAt);
+  const points = buckets.map((bucket) => ({
+    x: (Date.parse(bucket.t) - start) / 1000,
+    y: bucket.p95,
+  }));
+  const maxX = Math.max(1, ...points.map((p) => p.x));
+  const maxY = Math.max(1, ...points.map((p) => p.y));
+  const w = 640;
+  const h = 180;
+  const pad = 28;
+  const sx = (x: number) => pad + (x / maxX) * (w - pad * 2);
+  const sy = (y: number) => h - pad - (y / maxY) * (h - pad * 2);
+  const d = points.map((p, i) => `${i === 0 ? "M" : "L"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ");
+  const marker = (kind: string) => events.find((event) => event.kind === kind);
+  const injected = marker("fault_injected");
+  const removed = marker("fault_removed");
+  const line = (event?: EventRow) => {
+    if (!event) return null;
+    const x = sx((Date.parse(event.at) - start) / 1000);
+    return <line x1={x} x2={x} y1={pad} y2={h - pad} stroke="#ff5a36" strokeDasharray="3 3" />;
+  };
+  return (
+    <svg className="chart" viewBox={`0 0 ${w} ${h}`} role="img" aria-label="p95 latency over the experiment">
+      <line x1={pad} x2={w - pad} y1={h - pad} y2={h - pad} stroke="#2c3a30" />
+      <path d={d} fill="none" stroke="#d6ff4a" strokeWidth="2" />
+      {line(injected)}
+      {line(removed)}
+      <text className="axis" x={pad} y={16}>{Math.round(maxY)} ms</text>
+      <text className="axis" x={w - pad - 36} y={h - 8}>{Math.round(maxX)}s</text>
+    </svg>
+  );
+}
+
+function Timeline({ events, startedAt }: { events: EventRow[]; startedAt?: string }) {
+  if (!events.length || !startedAt) return <p className="warn">Events show up as the fault is injected and removed.</p>;
+  const start = Date.parse(startedAt);
+  return (
+    <ol className="timeline">
+      {events.map((event) => {
+        const seconds = Math.max(0, Math.round((Date.parse(event.at) - start) / 1000));
+        const label = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+        return (
+          <li key={event.id || `${event.kind}-${event.at}`}>
+            <time>{label}</time>
+            <span>{event.message}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function Report({ result }: { result: Result | null }) {
+  if (!result) return <p className="warn">The baseline, failure, and recovery comparison appears when the run finishes.</p>;
+  return (
+    <>
+      <div className="numbers">
+        <WindowCard title="Baseline" window={result.baseline} />
+        <WindowCard title="During failure" window={result.failure} />
+        <WindowCard title="Recovery" window={result.recovery} />
+      </div>
+      <p className="conclusion">{result.conclusion}</p>
+      {result.recoveryMs !== null ? <p>Recovery time: {(result.recoveryMs / 1000).toFixed(1)} seconds</p> : null}
+      {result.retryFactor >= 2 ? <p>Target receive rate: {result.retryFactor.toFixed(1)}x baseline</p> : null}
+      <pre className="report">{result.text}</pre>
+    </>
+  );
+}
+
+function WindowCard({ title, window }: { title: string; window: Window }) {
+  return (
+    <article>
+      <h3>{title}</h3>
+      <p>p50 {fmtMs(window.p50)}</p>
+      <p>p95 {fmtMs(window.p95)}</p>
+      <p>errors {(window.errorRate * 100).toFixed(1)}%</p>
+    </article>
+  );
+}
+
+function fmtMs(ms: number) {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)} sec`;
+  return `${Math.round(ms)} ms`;
+}
