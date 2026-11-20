@@ -122,10 +122,12 @@ type Event struct {
 type Fault struct {
 	ExperimentID int64
 	Service      string
+	ContainerID  string
 	Type         string
 	Delay        time.Duration
 	LossPercent  float64
 	CPUPercent   float64
 	InjectedAt   *time.Time
 	RemovedAt    *time.Time
+	Deadline     *time.Time
 }

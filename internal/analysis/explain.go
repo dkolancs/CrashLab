@@ -26,9 +26,9 @@ func Explain(exp model.Experiment, out Outcome) string {
 	default:
 		parts = append(parts, fmt.Sprintf("%s on %s stayed within the baseline spread.", fault, exp.Target))
 	}
-	parts = append(parts, fmt.Sprintf("Entry error rate moved from %s to %s. Entry p95 moved from %s to %s.",
+	parts = append(parts, fmt.Sprintf("Entry error rate moved from %s to %s. Entry p95 of successful calls moved from %s to %s.",
 		formatPercent(out.Baseline.ErrorRate), formatPercent(out.Failure.ErrorRate),
-		formatLatency(out.Baseline.P95), formatLatency(out.Failure.P95)))
+		successP95(out.Baseline), successP95(out.Failure)))
 	if out.RetryFactor >= 2 {
 		parts = append(parts, fmt.Sprintf("%s receive rate rose to %.1fx its baseline during the fault.", exp.Target, out.RetryFactor))
 	}
@@ -36,4 +36,11 @@ func Explain(exp model.Experiment, out Outcome) string {
 		parts = append(parts, fmt.Sprintf("Recovery took %.1fs after the fault was removed.", float64(*out.RecoveryMs)/1000))
 	}
 	return strings.Join(parts, " ")
+}
+
+func successP95(w Window) string {
+	if w.SuccessCount == 0 {
+		return "n/a"
+	}
+	return formatLatency(w.P95)
 }

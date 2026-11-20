@@ -26,14 +26,77 @@ func TestPercentileAndErrorRate(t *testing.T) {
 		{lat: 40},
 	}
 	w := summarize(reqs)
-	if w.ErrorRate != 0.25 || w.Count != 4 || w.P50 != 20 {
+	if w.ErrorRate != 0.25 || w.Count != 4 || w.SuccessCount != 3 || w.P50All != 20 || w.P50 != 30 {
 		t.Fatalf("window = %#v", w)
+	}
+}
+
+func TestKillDoesNotImproveSuccessLatency(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	injected := start.Add(10 * time.Second)
+	removed := start.Add(20 * time.Second)
+	exp := model.Experiment{
+		ID: 4, Target: "payment-service", EntryService: "storefront",
+		FaultType: model.FaultKill, StartedAt: start,
+	}
+	var samples []model.Sample
+	add := func(at time.Time, phase string, lat float64, err bool) {
+		ev := 0.0
+		if err {
+			ev = 1
+		}
+		samples = append(samples,
+			model.Sample{At: at, Phase: phase, Source: model.SourceLoad, Service: "storefront", Name: model.MetricLatencyMS, Value: lat},
+			model.Sample{At: at, Phase: phase, Source: model.SourceLoad, Service: "storefront", Name: model.MetricError, Value: ev},
+		)
+	}
+	for i := 0; i < 10; i++ {
+		add(start.Add(time.Duration(i)*time.Second), model.PhaseBaseline, 40, false)
+	}
+	for i := 10; i < 20; i++ {
+		add(start.Add(time.Duration(i)*time.Second), model.PhaseObserve, 8, true)
+	}
+	out := Evaluate(exp, samples, nil, injected, removed)
+	if !out.Degraded || out.Failure.ErrorRate != 1 || out.Failure.SuccessCount != 0 {
+		t.Fatalf("outcome = %#v", out)
+	}
+	if out.Failure.P95 != 0 || out.Failure.P95All >= out.Baseline.P95 {
+		t.Fatalf("failure latency success=%v all=%v baseline=%v", out.Failure.P95, out.Failure.P95All, out.Baseline.P95)
+	}
+	text := Format(exp, out, nil)
+	if strings.Contains(text, "p95 latency      8 ms") {
+		t.Fatalf("report treats fast errors as a better p95\n%s", text)
+	}
+	if !strings.Contains(text, "n/a") || !strings.Contains(text, "System degraded") {
+		t.Fatalf("report = %s", text)
+	}
+}
+
+func TestShortBaselineIsNotEnoughData(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	exp := model.Experiment{ID: 1, Target: "payment-service", EntryService: "storefront", StartedAt: start}
+	var samples []model.Sample
+	for i := 0; i < 3; i++ {
+		at := start.Add(time.Duration(i) * time.Second)
+		samples = append(samples,
+			model.Sample{At: at, Phase: model.PhaseBaseline, Source: model.SourceLoad, Service: "storefront", Name: model.MetricLatencyMS, Value: 30},
+			model.Sample{At: at, Phase: model.PhaseBaseline, Source: model.SourceLoad, Service: "storefront", Name: model.MetricError, Value: 0},
+			model.Sample{At: at.Add(10 * time.Second), Phase: model.PhaseObserve, Source: model.SourceLoad, Service: "storefront", Name: model.MetricLatencyMS, Value: 30},
+			model.Sample{At: at.Add(10 * time.Second), Phase: model.PhaseObserve, Source: model.SourceLoad, Service: "storefront", Name: model.MetricError, Value: 0},
+		)
+	}
+	out := Evaluate(exp, samples, nil, start.Add(10*time.Second), start.Add(20*time.Second))
+	if out.Conclusion != "Not enough data" || out.RecoveryMs != nil {
+		t.Fatalf("conclusion=%s recovery=%v", out.Conclusion, out.RecoveryMs)
+	}
+	if !strings.Contains(Format(exp, out, nil), "not enough data") {
+		t.Fatal("report missing not enough data")
 	}
 }
 
 func TestRecoveryAfterSustainedHealth(t *testing.T) {
 	removed := time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC)
-	baseline := Window{P50: 40, P95: 50, ErrorRate: 0, Count: 10}
+	baseline := Window{P50: 40, P95: 50, ErrorRate: 0, Count: 10, SuccessCount: 10}
 	var reqs []request
 	reqs = append(reqs, request{at: removed.Add(500 * time.Millisecond), lat: 800, err: true})
 	reqs = append(reqs, request{at: removed.Add(1 * time.Second), lat: 700, err: true})

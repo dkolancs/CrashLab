@@ -100,6 +100,9 @@ func judgeOne(out Outcome, rule Assertion) AssertionResult {
 		actual = out.Failure.ErrorRate
 		label = fmt.Sprintf("error rate %s (got %s)", rule.Raw, formatPercent(actual))
 	case "p95_latency":
+		if out.Failure.SuccessCount == 0 {
+			return AssertionResult{Name: rule.Name, Pass: false, Detail: fmt.Sprintf("p95 latency %s (no successful calls)", rule.Raw)}
+		}
 		actual = out.Failure.P95
 		label = fmt.Sprintf("p95 latency %s (got %s)", rule.Raw, formatLatency(actual))
 	case "recovery_time":

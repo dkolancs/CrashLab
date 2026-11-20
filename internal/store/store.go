@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS experiment_results (
 		`ALTER TABLE faults ADD COLUMN fault_type TEXT NOT NULL DEFAULT 'latency'`,
 		`ALTER TABLE faults ADD COLUMN loss_percent REAL NOT NULL DEFAULT 0`,
 		`ALTER TABLE faults ADD COLUMN cpu_percent REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE faults ADD COLUMN container_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE faults ADD COLUMN deadline_at INTEGER`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return fmt.Errorf("migrate: %w", err)
@@ -263,8 +265,8 @@ FROM services WHERE experiment_id = ? ORDER BY name`, experimentID)
 // UpsertFault inserts or replaces the fault row.
 func (s *Store) UpsertFault(f model.Fault) error {
 	_, err := s.db.Exec(`
-INSERT INTO faults (experiment_id, service, delay_ms, injected_at, removed_at, fault_type, loss_percent, cpu_percent)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO faults (experiment_id, service, delay_ms, injected_at, removed_at, fault_type, loss_percent, cpu_percent, container_id, deadline_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(experiment_id) DO UPDATE SET
   service = excluded.service,
   delay_ms = excluded.delay_ms,
@@ -272,9 +274,11 @@ ON CONFLICT(experiment_id) DO UPDATE SET
   removed_at = excluded.removed_at,
   fault_type = excluded.fault_type,
   loss_percent = excluded.loss_percent,
-  cpu_percent = excluded.cpu_percent`,
+  cpu_percent = excluded.cpu_percent,
+  container_id = excluded.container_id,
+  deadline_at = excluded.deadline_at`,
 		f.ExperimentID, f.Service, f.Delay.Milliseconds(), nullTime(f.InjectedAt), nullTime(f.RemovedAt),
-		faultTypeOrLatency(f.Type), f.LossPercent, f.CPUPercent,
+		faultTypeOrLatency(f.Type), f.LossPercent, f.CPUPercent, f.ContainerID, nullTime(f.Deadline),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert fault: %w", err)
@@ -284,12 +288,12 @@ ON CONFLICT(experiment_id) DO UPDATE SET
 
 // GetFault loads the fault for an experiment.
 func (s *Store) GetFault(experimentID int64) (model.Fault, bool, error) {
-	row := s.db.QueryRow(`SELECT service, delay_ms, injected_at, removed_at, fault_type, loss_percent, cpu_percent FROM faults WHERE experiment_id = ?`, experimentID)
+	row := s.db.QueryRow(`SELECT service, delay_ms, injected_at, removed_at, fault_type, loss_percent, cpu_percent, container_id, deadline_at FROM faults WHERE experiment_id = ?`, experimentID)
 	var f model.Fault
 	var delay int64
-	var injected, removed sql.NullInt64
+	var injected, removed, deadline sql.NullInt64
 	f.ExperimentID = experimentID
-	if err := row.Scan(&f.Service, &delay, &injected, &removed, &f.Type, &f.LossPercent, &f.CPUPercent); err != nil {
+	if err := row.Scan(&f.Service, &delay, &injected, &removed, &f.Type, &f.LossPercent, &f.CPUPercent, &f.ContainerID, &deadline); err != nil {
 		if err == sql.ErrNoRows {
 			return f, false, nil
 		}
@@ -298,7 +302,32 @@ func (s *Store) GetFault(experimentID int64) (model.Fault, bool, error) {
 	f.Delay = time.Duration(delay) * time.Millisecond
 	f.InjectedAt = timePtr(injected)
 	f.RemovedAt = timePtr(removed)
+	f.Deadline = timePtr(deadline)
 	return f, true, nil
+}
+
+// ListOpenFaults returns faults that were injected and not marked removed.
+func (s *Store) ListOpenFaults() ([]model.Fault, error) {
+	rows, err := s.db.Query(`SELECT experiment_id, service, delay_ms, injected_at, removed_at, fault_type, loss_percent, cpu_percent, container_id, deadline_at FROM faults WHERE removed_at IS NULL AND injected_at IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Fault
+	for rows.Next() {
+		var f model.Fault
+		var delay int64
+		var injected, removed, deadline sql.NullInt64
+		if err := rows.Scan(&f.ExperimentID, &f.Service, &delay, &injected, &removed, &f.Type, &f.LossPercent, &f.CPUPercent, &f.ContainerID, &deadline); err != nil {
+			return nil, err
+		}
+		f.Delay = time.Duration(delay) * time.Millisecond
+		f.InjectedAt = timePtr(injected)
+		f.RemovedAt = timePtr(removed)
+		f.Deadline = timePtr(deadline)
+		out = append(out, f)
+	}
+	return out, rows.Err()
 }
 
 // InsertSamples appends a batch of measurements.

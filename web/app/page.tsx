@@ -31,8 +31,8 @@ type Experiment = {
 };
 
 type EventRow = { id: number; at: string; kind: string; service: string; message: string };
-type Bucket = { t: string; p95: number; errorRate: number };
-type Window = { p50: number; p95: number; errorRate: number; count: number };
+type Bucket = { t: string; p95: number; errorRate: number; successCount?: number };
+type Window = { p50: number; p95: number; errorRate: number; count: number; successCount?: number };
 type Result = {
   baseline: Window;
   failure: Window;
@@ -222,6 +222,15 @@ export default function Page() {
             <button disabled={busy || running} onClick={startExperiment}>
               {running ? "Running" : "Run experiment"}
             </button>
+            {running && snap.experiment ? (
+              <button
+                onClick={() => {
+                  fetch(`${API}/api/experiments/${snap.experiment?.id}/stop`, { method: "POST" }).catch((err: Error) => setFormError(err.message));
+                }}
+              >
+                Stop
+              </button>
+            ) : null}
             {suggestions.length ? (
               <div className="recent">
                 {suggestions.map((item) => (
@@ -398,7 +407,7 @@ function LatencyChart({ buckets, events, startedAt }: { buckets: Bucket[]; event
     return <p className="warn">Latency appears once the load generator records requests.</p>;
   }
   const start = Date.parse(startedAt);
-  const points = buckets.map((bucket) => ({
+  const points = buckets.filter((bucket) => bucket.successCount !== 0).map((bucket) => ({
     x: (Date.parse(bucket.t) - start) / 1000,
     y: bucket.p95,
   }));
@@ -470,8 +479,8 @@ function WindowCard({ title, window }: { title: string; window: Window }) {
   return (
     <article>
       <h3>{title}</h3>
-      <p>p50 {fmtMs(window.p50)}</p>
-      <p>p95 {fmtMs(window.p95)}</p>
+      <p>p50 {window.successCount === 0 ? "n/a" : fmtMs(window.p50)}</p>
+      <p>p95 {window.successCount === 0 ? "n/a" : fmtMs(window.p95)}</p>
       <p>errors {(window.errorRate * 100).toFixed(1)}%</p>
     </article>
   );

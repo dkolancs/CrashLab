@@ -90,6 +90,7 @@ func runCmd(args []string) int {
 	defer db.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	experiment.ReconcileOpen(ctx, db)
 	if !*noWeb {
 		startWeb(ctx)
 	}
@@ -201,6 +202,7 @@ func runSpec(dbPath string, spec experiment.Spec) int {
 	defer db.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	experiment.ReconcileOpen(ctx, db)
 	runner := &experiment.Runner{Store: db}
 	exp, err := runner.Run(ctx, spec)
 	text, _, ok, getErr := db.GetResult(exp.ID)
@@ -225,7 +227,12 @@ func injectCmd(args []string) int {
 	project := fs.String("project", "", "compose project")
 	delay := fs.String("delay", "800ms", "latency")
 	percent := fs.Float64("percent", 0, "loss or cpu percent")
+	allowUntracked := fs.Bool("allow-untracked", false, "inject without an experiment record")
 	if err := fs.Parse(args[2:]); err != nil {
+		return 2
+	}
+	if !*allowUntracked {
+		fmt.Fprintf(os.Stderr, "refusing to inject a fault outside an experiment; pass --allow-untracked or use crashlab experiment run\n")
 		return 2
 	}
 	parsedDelay, err := time.ParseDuration(*delay)
