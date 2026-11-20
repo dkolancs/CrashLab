@@ -69,7 +69,13 @@ const empty: Snapshot = {
 export default function Page() {
   const [snap, setSnap] = useState<Snapshot>(empty);
   const [target, setTarget] = useState("payment-service");
+  const [faultType, setFaultType] = useState("latency");
   const [delayMs, setDelayMs] = useState(800);
+  const [percent, setPercent] = useState(20);
+  const [suggestions, setSuggestions] = useState<Array<{ service: string; reasons: string[]; faults: string[] }>>([]);
+  const [compareLeft, setCompareLeft] = useState("");
+  const [compareRight, setCompareRight] = useState("");
+  const [comparison, setComparison] = useState<{ left: Snapshot; right: Snapshot } | null>(null);
   const [baselineS, setBaselineS] = useState(15);
   const [durationS, setDurationS] = useState(30);
   const [recoveryS, setRecoveryS] = useState(15);
@@ -91,6 +97,10 @@ export default function Page() {
 
   useEffect(() => {
     load().catch((err: Error) => setFormError(err.message));
+    fetch(`${API}/api/suggestions`)
+      .then((res) => (res.ok ? res.json() : { suggestions: [] }))
+      .then((body) => setSuggestions(body.suggestions ?? []))
+      .catch(() => undefined);
   }, [load]);
 
   const running = snap.experiment?.status === "running";
@@ -117,9 +127,12 @@ export default function Page() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: `${target}-latency`,
+          name: `${target}-${faultType}`,
           target,
+          faultType,
           delayMs,
+          lossPercent: percent,
+          cpuPercent: faultType === "cpu" ? percent : 0,
           baselineMs: baselineS * 1000,
           durationMs: durationS * 1000,
           recoveryMs: recoveryS * 1000,
@@ -169,9 +182,26 @@ export default function Page() {
                 </select>
               </label>
               <label>
-                Delay (ms)
-                <input type="number" min={1} value={delayMs} onChange={(e) => setDelayMs(Number(e.target.value))} />
+                Fault
+                <select value={faultType} onChange={(e) => setFaultType(e.target.value)}>
+                  <option value="latency">latency</option>
+                  <option value="loss">packet loss</option>
+                  <option value="kill">terminate</option>
+                  <option value="cpu">cpu stress</option>
+                </select>
               </label>
+              {faultType === "latency" ? (
+                <label>
+                  Delay (ms)
+                  <input type="number" min={1} value={delayMs} onChange={(e) => setDelayMs(Number(e.target.value))} />
+                </label>
+              ) : null}
+              {faultType === "loss" || faultType === "cpu" ? (
+                <label>
+                  Percent
+                  <input type="number" min={1} max={100} value={percent} onChange={(e) => setPercent(Number(e.target.value))} />
+                </label>
+              ) : null}
               <label>
                 Baseline (s)
                 <input type="number" min={1} value={baselineS} onChange={(e) => setBaselineS(Number(e.target.value))} />
@@ -192,6 +222,15 @@ export default function Page() {
             <button disabled={busy || running} onClick={startExperiment}>
               {running ? "Running" : "Run experiment"}
             </button>
+            {suggestions.length ? (
+              <div className="recent">
+                {suggestions.map((item) => (
+                  <button key={item.service} onClick={() => { setTarget(item.service); setFaultType(item.faults[0] ?? "latency"); }}>
+                    suggest {item.service}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             {snap.recent?.length ? (
               <div className="recent">
                 {snap.recent.map((exp) => (
@@ -199,6 +238,46 @@ export default function Page() {
                     #{String(exp.id).padStart(3, "0")} {exp.status}
                   </button>
                 ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="panel">
+            <h2>Compare runs</h2>
+            <div className="form">
+              <label>
+                Left
+                <select value={compareLeft} onChange={(e) => setCompareLeft(e.target.value)}>
+                  <option value="">choose</option>
+                  {(snap.recent ?? []).map((exp) => (
+                    <option key={exp.id} value={exp.id}>#{exp.id} {exp.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Right
+                <select value={compareRight} onChange={(e) => setCompareRight(e.target.value)}>
+                  <option value="">choose</option>
+                  {(snap.recent ?? []).map((exp) => (
+                    <option key={exp.id} value={exp.id}>#{exp.id} {exp.name}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <button
+              disabled={!compareLeft || !compareRight}
+              onClick={() => {
+                fetch(`${API}/api/compare?left=${compareLeft}&right=${compareRight}`)
+                  .then((res) => res.json())
+                  .then((body) => setComparison(body))
+                  .catch((err: Error) => setFormError(err.message));
+              }}
+            >
+              Compare
+            </button>
+            {comparison?.left?.result && comparison?.right?.result ? (
+              <div className="numbers">
+                <WindowCard title={`#${comparison.left.experiment?.id} failure`} window={comparison.left.result.failure} />
+                <WindowCard title={`#${comparison.right.experiment?.id} failure`} window={comparison.right.result.failure} />
               </div>
             ) : null}
           </div>

@@ -240,6 +240,8 @@ input, select {
   margin-top: 10px;
 }
 
+.compare-note { margin-top: 8px; color: var(--muted); font-size: 12px; }
+
 .recent button {
   background: transparent;
   color: var(--text);

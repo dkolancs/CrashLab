@@ -42,6 +42,9 @@ type experimentDTO struct {
 	RecoveryMs   int64      `json:"recoveryMs"`
 	EntryURL     string     `json:"entryUrl"`
 	EntryService string     `json:"entryService"`
+	FaultType    string     `json:"faultType"`
+	LossPercent  float64    `json:"lossPercent"`
+	CPUPercent   float64    `json:"cpuPercent"`
 	ComposeFile  string     `json:"composeFile"`
 	Project      string     `json:"project"`
 	StartedAt    time.Time  `json:"startedAt"`
@@ -61,16 +64,19 @@ type snapshot struct {
 }
 
 type createRequest struct {
-	Name         string `json:"name"`
-	Target       string `json:"target"`
-	DelayMs      int64  `json:"delayMs"`
-	BaselineMs   int64  `json:"baselineMs"`
-	DurationMs   int64  `json:"durationMs"`
-	RecoveryMs   int64  `json:"recoveryMs"`
-	EntryURL     string `json:"entryUrl"`
-	EntryService string `json:"entryService"`
-	ComposeFile  string `json:"composeFile"`
-	Project      string `json:"project"`
+	Name         string  `json:"name"`
+	Target       string  `json:"target"`
+	DelayMs      int64   `json:"delayMs"`
+	BaselineMs   int64   `json:"baselineMs"`
+	DurationMs   int64   `json:"durationMs"`
+	RecoveryMs   int64   `json:"recoveryMs"`
+	EntryURL     string  `json:"entryUrl"`
+	EntryService string  `json:"entryService"`
+	FaultType    string  `json:"faultType"`
+	LossPercent  float64 `json:"lossPercent"`
+	CPUPercent   float64 `json:"cpuPercent"`
+	ComposeFile  string  `json:"composeFile"`
+	Project      string  `json:"project"`
 }
 
 // Handler returns the HTTP routes.
@@ -79,6 +85,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/topology", s.topology)
 	mux.HandleFunc("GET /api/experiments", s.list)
+	mux.HandleFunc("GET /api/compare", s.compare)
+	mux.HandleFunc("GET /api/suggestions", s.suggestions)
 	mux.HandleFunc("POST /api/experiments", s.create)
 	mux.HandleFunc("GET /api/experiments/{id}/stream", s.stream)
 	mux.HandleFunc("GET /api/experiments/{id}/report", s.report)
@@ -107,6 +115,39 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func (s *Server) compare(w http.ResponseWriter, r *http.Request) {
+	left, err := strconv.ParseInt(r.URL.Query().Get("left"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "left id required"})
+		return
+	}
+	right, err := strconv.ParseInt(r.URL.Query().Get("right"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "right id required"})
+		return
+	}
+	leftSnap, err := s.snapshot(r.Context(), left)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	rightSnap, err := s.snapshot(r.Context(), right)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"left": leftSnap, "right": rightSnap})
+}
+
+func (s *Server) suggestions(w http.ResponseWriter, r *http.Request) {
+	topo, err := s.liveTopology(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"suggestions": discover.Suggest(topo.Services)})
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -173,7 +214,10 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	spec := experiment.ApplyDefaults(experiment.Spec{
 		Name:         req.Name,
 		Target:       req.Target,
+		FaultType:    req.FaultType,
 		Delay:        ms(req.DelayMs),
+		LossPercent:  req.LossPercent,
+		CPUPercent:   req.CPUPercent,
 		Baseline:     ms(req.BaselineMs),
 		Duration:     ms(req.DurationMs),
 		Recovery:     ms(req.RecoveryMs),
@@ -374,6 +418,9 @@ func toDTO(exp model.Experiment) experimentDTO {
 		RecoveryMs:   exp.Recovery.Milliseconds(),
 		EntryURL:     exp.EntryURL,
 		EntryService: exp.EntryService,
+		FaultType:    exp.FaultType,
+		LossPercent:  exp.LossPercent,
+		CPUPercent:   exp.CPUPercent,
 		ComposeFile:  exp.ComposeFile,
 		Project:      exp.Project,
 		StartedAt:    exp.StartedAt,

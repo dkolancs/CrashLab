@@ -46,6 +46,9 @@ type Outcome struct {
 	RetryFactor float64           `json:"retryFactor"`
 	CPUBaseline float64           `json:"cpuBaseline"`
 	CPUFailure  float64           `json:"cpuFailure"`
+	PathNote    string            `json:"pathNote"`
+	Explanation string            `json:"explanation"`
+	Assertions  []AssertionResult `json:"assertions"`
 	Derived     []model.Event     `json:"-"`
 }
 
@@ -59,8 +62,10 @@ type request struct {
 // Evaluate compares baseline, failure, and recovery for one experiment.
 // Propagation is timestamp correlation along declared dependencies, not proof of causation.
 func Evaluate(exp model.Experiment, samples []model.Sample, services []model.Service, injectedAt, removedAt time.Time) Outcome {
+	services = mergeTraceDependencies(services, samples)
 	reqs := pairRequests(samples, exp.EntryService, model.SourceLoad)
 	out := Outcome{
+		PathNote:   pathNote(samples),
 		Baseline:   windowFor(reqs, model.PhaseBaseline),
 		Failure:    windowFor(reqs, model.PhaseObserve),
 		Recovery:   windowFor(reqs, model.PhaseRecovery),
@@ -114,11 +119,11 @@ func Propagation(samples []model.Sample, services []model.Service, fault string,
 		if _, ok := dist[svc.Name]; !ok {
 			continue
 		}
-		at, ok := departure(samples, svc.Name, injectedAt)
+		at, reason, ok := departure(samples, svc.Name, injectedAt)
 		if !ok {
 			continue
 		}
-		hops = append(hops, Hop{Service: svc.Name, At: at, Reason: "latency"})
+		hops = append(hops, Hop{Service: svc.Name, At: at, Reason: reason})
 	}
 	sort.SliceStable(hops, func(i, j int) bool {
 		if !hops[i].At.Equal(hops[j].At) {
@@ -152,7 +157,22 @@ func distances(services []model.Service, fault string) map[string]int {
 	return dist
 }
 
-func departure(samples []model.Sample, service string, injectedAt time.Time) (time.Time, bool) {
+func departure(samples []model.Sample, service string, injectedAt time.Time) (time.Time, string, bool) {
+	latAt, latOK := latencyDeparture(samples, service, injectedAt)
+	errAt, errOK := errorDeparture(samples, service, injectedAt)
+	switch {
+	case latOK && errOK && errAt.Before(latAt):
+		return errAt, "errors", true
+	case latOK:
+		return latAt, "latency", true
+	case errOK:
+		return errAt, "errors", true
+	default:
+		return time.Time{}, "", false
+	}
+}
+
+func latencyDeparture(samples []model.Sample, service string, injectedAt time.Time) (time.Time, bool) {
 	var base []float64
 	var after []struct {
 		at time.Time
@@ -196,18 +216,104 @@ func departure(samples []model.Sample, service string, injectedAt time.Time) (ti
 	return time.Time{}, false
 }
 
+func errorDeparture(samples []model.Sample, service string, injectedAt time.Time) (time.Time, bool) {
+	type point struct {
+		at   time.Time
+		req  float64
+		err  float64
+		hasR bool
+		hasE bool
+	}
+	by := map[int64]*point{}
+	var keys []int64
+	for _, sm := range samples {
+		if sm.Service != service || sm.Source != model.SourceStats {
+			continue
+		}
+		if sm.Name != model.MetricRequests && sm.Name != model.MetricErrors {
+			continue
+		}
+		key := sm.At.UnixNano()
+		item, ok := by[key]
+		if !ok {
+			item = &point{at: sm.At}
+			by[key] = item
+			keys = append(keys, key)
+		}
+		if sm.Name == model.MetricRequests {
+			item.req = sm.Value
+			item.hasR = true
+		} else {
+			item.err = sm.Value
+			item.hasE = true
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	var series []point
+	for _, key := range keys {
+		item := by[key]
+		if item.hasR && item.hasE {
+			series = append(series, *item)
+		}
+	}
+	if len(series) < 4 {
+		return time.Time{}, false
+	}
+	var baseErr, baseReq float64
+	var after []point
+	prev := series[0]
+	for _, item := range series[1:] {
+		dReq := item.req - prev.req
+		dErr := item.err - prev.err
+		if dReq < 0 || dErr < 0 {
+			prev = item
+			continue
+		}
+		if item.at.Before(injectedAt) {
+			baseReq += dReq
+			baseErr += dErr
+		} else if dReq > 0 {
+			after = append(after, point{at: item.at, req: dReq, err: dErr})
+		}
+		prev = item
+	}
+	baseRate := 0.0
+	if baseReq > 0 {
+		baseRate = baseErr / baseReq
+	}
+	threshold := baseRate + 0.2
+	for i := range after {
+		if after[i].req <= 0 || after[i].err/after[i].req <= threshold {
+			continue
+		}
+		for j := i + 1; j < len(after); j++ {
+			if after[j].at.Sub(after[i].at) > 3*time.Second {
+				break
+			}
+			if after[j].req > 0 && after[j].err/after[j].req > threshold {
+				return after[i].at, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
 func derivedEvents(exp model.Experiment, out Outcome, samples []model.Sample, injectedAt time.Time) []model.Event {
 	var events []model.Event
 	for _, hop := range out.Hops {
-		if hop.Reason != "latency" {
+		if hop.Reason != "latency" && hop.Reason != "errors" {
 			continue
+		}
+		label := "latency"
+		if hop.Reason == "errors" {
+			label = "errors"
 		}
 		events = append(events, model.Event{
 			ExperimentID: exp.ID,
 			At:           hop.At,
 			Kind:         model.KindDegraded,
 			Service:      hop.Service,
-			Message:      hop.Service + " latency departed from baseline",
+			Message:      hop.Service + " " + label + " departed from baseline",
 		})
 	}
 	if out.Failure.ErrorRate >= out.Baseline.ErrorRate+0.05 {

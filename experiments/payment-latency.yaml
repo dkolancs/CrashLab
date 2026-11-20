@@ -1,0 +1,18 @@
+name: payment-latency
+target:
+  service: payment-service
+fault:
+  type: latency
+  delay: 800ms
+experiment:
+  baseline: 15s
+  duration: 30s
+  recovery: 15s
+entry:
+  url: http://127.0.0.1:8081/checkout
+  service: storefront
+compose: demo/compose.yaml
+expect:
+  error_rate: "< 5%"
+  p95_latency: "< 1000ms"
+  recovery_time: "< 10s"

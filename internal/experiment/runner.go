@@ -18,11 +18,14 @@ import (
 	"github.com/docker/docker/client"
 )
 
-// Spec is a request to run one latency experiment.
+// Spec is a request to run one experiment.
 type Spec struct {
 	Name         string
 	Target       string
+	FaultType    string
 	Delay        time.Duration
+	LossPercent  float64
+	CPUPercent   float64
 	Baseline     time.Duration
 	Duration     time.Duration
 	Recovery     time.Duration
@@ -31,6 +34,7 @@ type Spec struct {
 	ComposeFile  string
 	Project      string
 	NetemDir     string
+	Assertions   []analysis.Assertion
 }
 
 // ApplyDefaults fills the v0.1 demo settings.
@@ -41,8 +45,17 @@ func ApplyDefaults(s Spec) Spec {
 	if s.Target == "" {
 		s.Target = "payment-service"
 	}
-	if s.Delay == 0 {
+	if s.FaultType == "" {
+		s.FaultType = model.FaultLatency
+	}
+	if s.FaultType == model.FaultLatency && s.Delay == 0 {
 		s.Delay = 800 * time.Millisecond
+	}
+	if s.FaultType == model.FaultLoss && s.LossPercent == 0 {
+		s.LossPercent = 20
+	}
+	if s.FaultType == model.FaultCPU && s.CPUPercent == 0 {
+		s.CPUPercent = 90
 	}
 	if s.Baseline == 0 {
 		s.Baseline = 15 * time.Second
@@ -90,7 +103,10 @@ func (r *Runner) Start(parent context.Context, spec Spec) (model.Experiment, err
 		Status:       model.StatusRunning,
 		Phase:        model.PhaseSetup,
 		Target:       spec.Target,
+		FaultType:    spec.FaultType,
 		Delay:        spec.Delay,
+		LossPercent:  spec.LossPercent,
+		CPUPercent:   spec.CPUPercent,
 		Baseline:     spec.Baseline,
 		Duration:     spec.Duration,
 		Recovery:     spec.Recovery,
@@ -139,6 +155,9 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (model.Experiment, error) {
 			if current.Status == model.StatusCompleted || current.Status == model.StatusFailed {
 				if current.Status == model.StatusFailed {
 					return current, fmt.Errorf("%s", current.Error)
+				}
+				if _, summary, ok, err := r.Store.GetResult(current.ID); err == nil && ok && analysis.SummaryFailed(summary) {
+					return current, fmt.Errorf("experiment failed assertions")
 				}
 				return current, nil
 			}
@@ -277,20 +296,25 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 	}
 	log.Printf("experiment %d phase=inject", exp.ID)
 	injectedAt := time.Now().UTC()
-	if err := fault.Inject(ctx, cli, targetID, spec.Delay.String()); err != nil {
+	if err := fault.Apply(ctx, cli, targetID, fault.Request{
+		Kind:    spec.FaultType,
+		Delay:   spec.Delay,
+		Percent: faultPercent(spec),
+	}); err != nil {
 		stopCollectors()
 		runErr = err
 		return
 	}
 	if err := r.Store.UpsertFault(model.Fault{
-		ExperimentID: exp.ID, Service: spec.Target, Delay: spec.Delay, InjectedAt: &injectedAt,
+		ExperimentID: exp.ID, Service: spec.Target, Type: spec.FaultType, Delay: spec.Delay,
+		LossPercent: spec.LossPercent, CPUPercent: spec.CPUPercent, InjectedAt: &injectedAt,
 	}); err != nil {
 		stopCollectors()
 		runErr = err
 		return
 	}
 	if err := r.Store.AddEvent(model.Event{
-		ExperimentID: exp.ID, At: injectedAt, Kind: model.KindFaultInjected, Service: spec.Target, Message: "Fault injected",
+		ExperimentID: exp.ID, At: injectedAt, Kind: model.KindFaultInjected, Service: spec.Target, Message: faultMessage(spec),
 	}); err != nil {
 		stopCollectors()
 		runErr = err
@@ -327,7 +351,10 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 	faultRow, _, _ := r.Store.GetFault(exp.ID)
 	faultRow.ExperimentID = exp.ID
 	faultRow.Service = spec.Target
+	faultRow.Type = spec.FaultType
 	faultRow.Delay = spec.Delay
+	faultRow.LossPercent = spec.LossPercent
+	faultRow.CPUPercent = spec.CPUPercent
 	if faultRow.InjectedAt == nil {
 		faultRow.InjectedAt = &injectedAt
 	}
@@ -362,7 +389,7 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 	_ = r.setPhase(exp.ID, model.PhaseAnalysis)
 	stopCollectors()
 	log.Printf("experiment %d phase=analysis", exp.ID)
-	if err := r.analyze(exp.ID, injectedAt, removedAt); err != nil {
+	if err := r.analyze(exp.ID, spec, injectedAt, removedAt); err != nil {
 		runErr = err
 		return
 	}
@@ -383,7 +410,27 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 	log.Printf("experiment %d phase=done", exp.ID)
 }
 
-func (r *Runner) analyze(id int64, injectedAt, removedAt time.Time) error {
+func faultPercent(spec Spec) float64 {
+	if spec.FaultType == model.FaultCPU {
+		return spec.CPUPercent
+	}
+	return spec.LossPercent
+}
+
+func faultMessage(spec Spec) string {
+	switch spec.FaultType {
+	case model.FaultLoss:
+		return fmt.Sprintf("Packet loss injected (%.0f%%)", spec.LossPercent)
+	case model.FaultKill:
+		return "Container terminated"
+	case model.FaultCPU:
+		return fmt.Sprintf("CPU stress injected (%.0f%%)", spec.CPUPercent)
+	default:
+		return "Fault injected"
+	}
+}
+
+func (r *Runner) analyze(id int64, spec Spec, injectedAt, removedAt time.Time) error {
 	exp, err := r.Store.GetExperiment(id)
 	if err != nil {
 		return err
@@ -397,6 +444,8 @@ func (r *Runner) analyze(id int64, injectedAt, removedAt time.Time) error {
 		return err
 	}
 	outcome := analysis.Evaluate(exp, samples, services, injectedAt, removedAt)
+	outcome.Assertions = analysis.Judge(outcome, spec.Assertions)
+	outcome.Explanation = analysis.Explain(exp, outcome)
 	for _, ev := range outcome.Derived {
 		if err := r.Store.AddEvent(ev); err != nil {
 			return err

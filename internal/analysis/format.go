@@ -17,7 +17,7 @@ func Format(exp model.Experiment, out Outcome, events []model.Event) string {
 	fmt.Fprintf(&b, "FAULT\n")
 	fmt.Fprintf(&b, "────────────────────────────\n")
 	fmt.Fprintf(&b, "%s\n", exp.Target)
-	fmt.Fprintf(&b, "+%s network latency\n", exp.Delay)
+	fmt.Fprintf(&b, "%s\n", faultDescription(exp))
 	fmt.Fprintf(&b, "%s\n\n", humanDuration(exp.Duration))
 
 	writeWindow(&b, "BASELINE", out.Baseline, out.CPUBaseline)
@@ -36,7 +36,11 @@ func Format(exp model.Experiment, out Outcome, events []model.Event) string {
 			fmt.Fprintf(&b, "%s\n", hop.Service)
 		}
 	}
-	fmt.Fprintf(&b, "\nTimestamp correlation along declared dependencies.\n\n")
+	note := out.PathNote
+	if note == "" {
+		note = "Timestamp correlation along declared dependencies."
+	}
+	fmt.Fprintf(&b, "\n%s\n\n", note)
 
 	fmt.Fprintf(&b, "EVENTS\n")
 	fmt.Fprintf(&b, "────────────────────────────\n")
@@ -65,7 +69,46 @@ func Format(exp model.Experiment, out Outcome, events []model.Event) string {
 	if out.RetryFactor >= 2 {
 		fmt.Fprintf(&b, "Target receive rate: %.1fx baseline\n", out.RetryFactor)
 	}
+	if out.Explanation != "" {
+		fmt.Fprintf(&b, "\nEXPLANATION\n")
+		fmt.Fprintf(&b, "────────────────────────────\n")
+		fmt.Fprintf(&b, "%s\n", out.Explanation)
+	}
+	if len(out.Assertions) > 0 {
+		fmt.Fprintf(&b, "\nASSERTIONS\n")
+		fmt.Fprintf(&b, "────────────────────────────\n")
+		failed := false
+		for _, check := range out.Assertions {
+			label := "PASS"
+			if !check.Pass {
+				label = "FAIL"
+				failed = true
+			}
+			fmt.Fprintf(&b, "%s %s\n", label, check.Detail)
+		}
+		if failed {
+			fmt.Fprintf(&b, "\nExperiment FAILED\n")
+		} else {
+			fmt.Fprintf(&b, "\nExperiment PASSED\n")
+		}
+	}
 	return b.String()
+}
+
+func faultDescription(exp model.Experiment) string {
+	switch exp.FaultType {
+	case model.FaultLoss:
+		return fmt.Sprintf("%.0f%% packet loss", exp.LossPercent)
+	case model.FaultKill:
+		return "container terminated"
+	case model.FaultCPU:
+		return fmt.Sprintf("%.0f%% cpu", exp.CPUPercent)
+	default:
+		if exp.Delay == 0 {
+			return "+800ms network latency"
+		}
+		return fmt.Sprintf("+%s network latency", exp.Delay)
+	}
 }
 
 func writeWindow(b *strings.Builder, title string, w Window, cpu float64) {

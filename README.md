@@ -29,4 +29,17 @@ go run ./cmd/crashlab experiment run \
 go run ./cmd/crashlab report 1
 ```
 
+Saved experiments live in `experiments/`. `crashlab test` runs every file in a directory and exits non-zero when an assertion fails.
+
+```bash
+go run ./cmd/crashlab experiment run experiments/payment-latency.yaml
+go run ./cmd/crashlab test experiments/ci-smoke.yaml
+go run ./cmd/crashlab inject loss payment-service --percent 20
+go run ./cmd/crashlab inject kill payment-service
+go run ./cmd/crashlab inject cpu checkout-service --percent 90
+go run ./cmd/crashlab clear payment-service
+```
+
+The dashboard can compare two saved runs. It also suggests latency, termination, and packet loss for services that other services depend on. Demo services record `traceparent` calls on `/traces`, and those edges are included in propagation.
+
 CrashLab needs a local Docker daemon and permission to run a helper container with `NET_ADMIN` on the target network namespace. The helper image is `crashlab-netem:local`. It uses `tc netem` when the kernel provides it. Kernels built without `sch_netem` instead redirect the target port to a delay proxy in that same network namespace.

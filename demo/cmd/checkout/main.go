@@ -24,12 +24,7 @@ func main() {
 		ok := false
 		for i := 0; i < attempts; i++ {
 			ctx, cancel := context.WithTimeout(r.Context(), 400*time.Millisecond)
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, paymentURL+"/charge", nil)
-			if err != nil {
-				cancel()
-				break
-			}
-			status, _, err := kit.Get(req)
+			status, _, err := kit.Call(ctx, "checkout-service", "payment-service", paymentURL+"/charge")
 			cancel()
 			lastStatus = status
 			if err == nil && status < 500 {
