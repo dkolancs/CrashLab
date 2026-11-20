@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +18,13 @@ import (
 )
 
 const ImageName = "crashlab-netem:local"
+
+// Request is one fault to apply to a container.
+type Request struct {
+	Kind    string
+	Delay   time.Duration
+	Percent float64
+}
 
 // Prepare builds the local netem helper image when it is missing.
 func Prepare(ctx context.Context, dir string) error {
@@ -30,6 +39,22 @@ func Prepare(ctx context.Context, dir string) error {
 		return fmt.Errorf("build %s: %w\n%s", ImageName, err, tail(buf.String()))
 	}
 	return nil
+}
+
+// Apply injects latency, packet loss, container termination, or CPU stress.
+func Apply(ctx context.Context, cli *client.Client, containerID string, req Request) error {
+	switch req.Kind {
+	case "", "latency":
+		return Inject(ctx, cli, containerID, req.Delay.String())
+	case "loss":
+		return injectLoss(ctx, cli, containerID, req.Percent)
+	case "kill":
+		return cli.ContainerKill(ctx, containerID, "SIGKILL")
+	case "cpu":
+		return stressCPU(ctx, cli, containerID, req.Percent)
+	default:
+		return fmt.Errorf("unknown fault %q", req.Kind)
+	}
 }
 
 // Inject applies egress netem delay inside the target container's network namespace.
@@ -51,14 +76,70 @@ func Inject(ctx context.Context, cli *client.Client, containerID, delay string) 
 	return nil
 }
 
-// Clear removes the root qdisc and any delay proxy. Missing faults are not an error.
+// Clear removes network faults, stops CPU stress, and starts a container that was terminated.
 func Clear(ctx context.Context, cli *client.Client, containerID string) error {
-	out, err := run(ctx, cli, containerID, "clear")
-	stopErr := stopFallback(ctx, cli, containerID)
+	running, err := containerRunning(ctx, cli, containerID)
 	if err != nil {
-		return fmt.Errorf("clear latency on %s: %w\n%s", short(containerID), err, out)
+		return err
 	}
-	return stopErr
+	if running {
+		out, err := run(ctx, cli, containerID, "clear")
+		if err != nil {
+			return fmt.Errorf("clear latency on %s: %w\n%s", short(containerID), err, out)
+		}
+		if err := stopFallback(ctx, cli, containerID); err != nil {
+			return err
+		}
+		if err := stopCPU(ctx, cli, containerID); err != nil {
+			return err
+		}
+	}
+	return ensureRunning(ctx, cli, containerID)
+}
+
+func containerRunning(ctx context.Context, cli *client.Client, containerID string) (bool, error) {
+	inspected, err := cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return false, err
+	}
+	return inspected.State != nil && inspected.State.Running, nil
+}
+
+func injectLoss(ctx context.Context, cli *client.Client, containerID string, percent float64) error {
+	out, err := run(ctx, cli, containerID, "inject-loss", fmt.Sprintf("%g", percent))
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(out+" "+err.Error()), "unknown") {
+		return fmt.Errorf("inject loss on %s: %w\n%s", short(containerID), err, out)
+	}
+	port := servicePort(ctx, cli, containerID)
+	log.Printf("kernel has no sch_netem; dropping %.0f%% of connections to %s port %d", percent, short(containerID), port)
+	return startFallbackMode(ctx, cli, containerID, "fallback-loss", fmt.Sprintf("%g", percent), port)
+}
+
+func ensureRunning(ctx context.Context, cli *client.Client, containerID string) error {
+	deadline := time.Now().Add(20 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		inspected, err := cli.ContainerInspect(ctx, containerID)
+		if err != nil {
+			return err
+		}
+		if inspected.State != nil && inspected.State.Running {
+			return nil
+		}
+		if inspected.State == nil || inspected.State.Status != "restarting" {
+			if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+				last = err
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if last == nil {
+		last = fmt.Errorf("container %s did not return to running", short(containerID))
+	}
+	return last
 }
 
 // Show returns the target interface qdisc, used to confirm the fault is gone.
@@ -106,24 +187,28 @@ func servicePort(ctx context.Context, cli *client.Client, containerID string) in
 }
 
 func startFallback(ctx context.Context, cli *client.Client, containerID, delay string, port int) error {
+	return startFallbackMode(ctx, cli, containerID, "fallback", delay, port)
+}
+
+func startFallbackMode(ctx context.Context, cli *client.Client, containerID, mode, arg string, port int) error {
 	if err := stopFallback(ctx, cli, containerID); err != nil {
 		return err
 	}
-	out, err := startFallbackOnce(ctx, cli, containerID, delay, port, false)
+	out, err := startFallbackOnce(ctx, cli, containerID, mode, arg, port, false)
 	if err == nil {
 		return nil
 	}
 	if !needsPrivilege(out) && !needsPrivilege(err.Error()) {
 		return err
 	}
-	_, err = startFallbackOnce(ctx, cli, containerID, delay, port, true)
+	_, err = startFallbackOnce(ctx, cli, containerID, mode, arg, port, true)
 	return err
 }
 
-func startFallbackOnce(ctx context.Context, cli *client.Client, containerID, delay string, port int, privileged bool) (string, error) {
+func startFallbackOnce(ctx context.Context, cli *client.Client, containerID, mode, arg string, port int, privileged bool) (string, error) {
 	created, err := cli.ContainerCreate(ctx, &container.Config{
 		Image: ImageName,
-		Cmd:   []string{"fallback", delay, strconv.Itoa(port)},
+		Cmd:   []string{mode, arg, strconv.Itoa(port)},
 		Tty:   true,
 		Labels: map[string]string{
 			"crashlab.role":   "delay",
@@ -255,6 +340,62 @@ func short(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+func stressCPU(ctx context.Context, cli *client.Client, containerID string, percent float64) error {
+	if err := stopCPU(ctx, cli, containerID); err != nil {
+		return err
+	}
+	bin, err := exportDelayBinary(ctx)
+	if err != nil {
+		return err
+	}
+	copy := exec.CommandContext(ctx, "docker", "cp", bin, containerID+":/tmp/crashlab-cpu")
+	if out, err := copy.CombinedOutput(); err != nil {
+		return fmt.Errorf("copy cpu helper: %w\n%s", err, out)
+	}
+	created, err := cli.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		Cmd:          []string{"/tmp/crashlab-cpu", "cpu", "--percent", fmt.Sprintf("%g", percent)},
+		Detach:       true,
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return fmt.Errorf("start cpu stress: %w", err)
+	}
+	if err := cli.ContainerExecStart(ctx, created.ID, container.ExecStartOptions{Detach: true}); err != nil {
+		return fmt.Errorf("start cpu stress: %w", err)
+	}
+	return nil
+}
+
+func stopCPU(ctx context.Context, cli *client.Client, containerID string) error {
+	created, err := cli.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		Cmd:          []string{"/bin/sh", "-c", "if [ -f /tmp/crashlab-cpu.pid ]; then kill $(cat /tmp/crashlab-cpu.pid) 2>/dev/null || true; rm -f /tmp/crashlab-cpu.pid; fi"},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return nil
+	}
+	_ = cli.ContainerExecStart(ctx, created.ID, container.ExecStartOptions{})
+	return nil
+}
+
+func exportDelayBinary(ctx context.Context) (string, error) {
+	create := exec.CommandContext(ctx, "docker", "create", ImageName)
+	out, err := create.Output()
+	if err != nil {
+		return "", fmt.Errorf("create helper: %w", err)
+	}
+	id := strings.TrimSpace(string(out))
+	defer exec.Command("docker", "rm", id).Run()
+	dest := filepath.Join(os.TempDir(), "crashlab-cpu-bin")
+	cp := exec.CommandContext(ctx, "docker", "cp", id+":/usr/local/bin/delayd", dest)
+	if output, err := cp.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("export helper: %w\n%s", err, output)
+	}
+	return dest, nil
 }
 
 func tail(s string) string {

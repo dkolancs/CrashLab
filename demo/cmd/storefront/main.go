@@ -39,21 +39,11 @@ func main() {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, inventoryURL+"/stock", nil)
-			if err != nil {
-				stockErr = err
-				return
-			}
-			stockStatus, stockBody, stockErr = kit.Get(req)
+			stockStatus, stockBody, stockErr = kit.Call(ctx, "storefront", "inventory-service", inventoryURL+"/stock")
 		}()
 		go func() {
 			defer wg.Done()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, checkoutURL+"/checkout", nil)
-			if err != nil {
-				checkErr = err
-				return
-			}
-			checkStatus, checkBody, checkErr = kit.Get(req)
+			checkStatus, checkBody, checkErr = kit.Call(ctx, "storefront", "checkout-service", checkoutURL+"/checkout")
 		}()
 		wg.Wait()
 

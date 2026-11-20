@@ -106,6 +106,18 @@ CREATE TABLE IF NOT EXISTS experiment_results (
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	for _, stmt := range []string{
+		`ALTER TABLE experiments ADD COLUMN fault_type TEXT NOT NULL DEFAULT 'latency'`,
+		`ALTER TABLE experiments ADD COLUMN loss_percent REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE experiments ADD COLUMN cpu_percent REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE faults ADD COLUMN fault_type TEXT NOT NULL DEFAULT 'latency'`,
+		`ALTER TABLE faults ADD COLUMN loss_percent REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE faults ADD COLUMN cpu_percent REAL NOT NULL DEFAULT 0`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -114,11 +126,13 @@ func (s *Store) CreateExperiment(e model.Experiment) (model.Experiment, error) {
 	res, err := s.db.Exec(`
 INSERT INTO experiments (
   name, status, phase, target, delay_ms, baseline_ms, duration_ms, recovery_ms,
-  entry_url, entry_service, compose_file, project, started_at, finished_at, error
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  entry_url, entry_service, compose_file, project, started_at, finished_at, error,
+  fault_type, loss_percent, cpu_percent
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.Name, e.Status, e.Phase, e.Target, e.Delay.Milliseconds(), e.Baseline.Milliseconds(),
 		e.Duration.Milliseconds(), e.Recovery.Milliseconds(), e.EntryURL, e.EntryService,
 		e.ComposeFile, e.Project, e.StartedAt.UnixMilli(), nullTime(e.FinishedAt), e.Error,
+		faultTypeOrLatency(e.FaultType), e.LossPercent, e.CPUPercent,
 	)
 	if err != nil {
 		return e, fmt.Errorf("insert experiment: %w", err)
@@ -149,7 +163,8 @@ WHERE id = ?`,
 func (s *Store) GetExperiment(id int64) (model.Experiment, error) {
 	row := s.db.QueryRow(`
 SELECT id, name, status, phase, target, delay_ms, baseline_ms, duration_ms, recovery_ms,
-       entry_url, entry_service, compose_file, project, started_at, finished_at, error
+       entry_url, entry_service, compose_file, project, started_at, finished_at, error,
+       fault_type, loss_percent, cpu_percent
 FROM experiments WHERE id = ?`, id)
 	e, err := scanExperiment(row)
 	if err != nil {
@@ -165,7 +180,8 @@ func (s *Store) ListExperiments(limit int) ([]model.Experiment, error) {
 	}
 	rows, err := s.db.Query(`
 SELECT id, name, status, phase, target, delay_ms, baseline_ms, duration_ms, recovery_ms,
-       entry_url, entry_service, compose_file, project, started_at, finished_at, error
+       entry_url, entry_service, compose_file, project, started_at, finished_at, error,
+       fault_type, loss_percent, cpu_percent
 FROM experiments ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -247,14 +263,18 @@ FROM services WHERE experiment_id = ? ORDER BY name`, experimentID)
 // UpsertFault inserts or replaces the fault row.
 func (s *Store) UpsertFault(f model.Fault) error {
 	_, err := s.db.Exec(`
-INSERT INTO faults (experiment_id, service, delay_ms, injected_at, removed_at)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO faults (experiment_id, service, delay_ms, injected_at, removed_at, fault_type, loss_percent, cpu_percent)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(experiment_id) DO UPDATE SET
   service = excluded.service,
   delay_ms = excluded.delay_ms,
   injected_at = excluded.injected_at,
-  removed_at = excluded.removed_at`,
+  removed_at = excluded.removed_at,
+  fault_type = excluded.fault_type,
+  loss_percent = excluded.loss_percent,
+  cpu_percent = excluded.cpu_percent`,
 		f.ExperimentID, f.Service, f.Delay.Milliseconds(), nullTime(f.InjectedAt), nullTime(f.RemovedAt),
+		faultTypeOrLatency(f.Type), f.LossPercent, f.CPUPercent,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert fault: %w", err)
@@ -264,12 +284,12 @@ ON CONFLICT(experiment_id) DO UPDATE SET
 
 // GetFault loads the fault for an experiment.
 func (s *Store) GetFault(experimentID int64) (model.Fault, bool, error) {
-	row := s.db.QueryRow(`SELECT service, delay_ms, injected_at, removed_at FROM faults WHERE experiment_id = ?`, experimentID)
+	row := s.db.QueryRow(`SELECT service, delay_ms, injected_at, removed_at, fault_type, loss_percent, cpu_percent FROM faults WHERE experiment_id = ?`, experimentID)
 	var f model.Fault
 	var delay int64
 	var injected, removed sql.NullInt64
 	f.ExperimentID = experimentID
-	if err := row.Scan(&f.Service, &delay, &injected, &removed); err != nil {
+	if err := row.Scan(&f.Service, &delay, &injected, &removed, &f.Type, &f.LossPercent, &f.CPUPercent); err != nil {
 		if err == sql.ErrNoRows {
 			return f, false, nil
 		}
@@ -392,6 +412,7 @@ func scanExperiment(row scanner) (model.Experiment, error) {
 	err := row.Scan(
 		&e.ID, &e.Name, &e.Status, &e.Phase, &e.Target, &delay, &baseline, &duration, &recovery,
 		&e.EntryURL, &e.EntryService, &e.ComposeFile, &e.Project, &started, &finished, &e.Error,
+		&e.FaultType, &e.LossPercent, &e.CPUPercent,
 	)
 	if err != nil {
 		return e, err
@@ -403,6 +424,13 @@ func scanExperiment(row scanner) (model.Experiment, error) {
 	e.StartedAt = time.UnixMilli(started).UTC()
 	e.FinishedAt = timePtr(finished)
 	return e, nil
+}
+
+func faultTypeOrLatency(v string) string {
+	if v == "" {
+		return model.FaultLatency
+	}
+	return v
 }
 
 func nullTime(t *time.Time) any {

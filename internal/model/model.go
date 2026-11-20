@@ -34,6 +34,14 @@ const (
 	KindTimeouts      = "timeouts"
 	KindRetry         = "retry"
 	KindRecovered     = "recovered"
+
+	FaultLatency = "latency"
+	FaultLoss    = "loss"
+	FaultKill    = "kill"
+	FaultCPU     = "cpu"
+
+	SourceTrace = "trace"
+	MetricTrace = "trace_ms"
 )
 
 // Service is one Compose service discovered from the Docker daemon.
@@ -81,6 +89,9 @@ type Experiment struct {
 	EntryService string
 	ComposeFile  string
 	Project      string
+	FaultType    string
+	LossPercent  float64
+	CPUPercent   float64
 	StartedAt    time.Time
 	FinishedAt   *time.Time
 	Error        string
@@ -107,11 +118,14 @@ type Event struct {
 	Message      string    `json:"message"`
 }
 
-// Fault records when latency was applied to a container.
+// Fault records when a fault was applied to a container.
 type Fault struct {
 	ExperimentID int64
 	Service      string
+	Type         string
 	Delay        time.Duration
+	LossPercent  float64
+	CPUPercent   float64
 	InjectedAt   *time.Time
 	RemovedAt    *time.Time
 }

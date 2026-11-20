@@ -1,0 +1,14 @@
+name: payment-loss
+target:
+  service: payment-service
+fault:
+  type: loss
+  percent: 20
+experiment:
+  baseline: 8s
+  duration: 12s
+  recovery: 8s
+entry:
+  url: http://127.0.0.1:8081/checkout
+  service: storefront
+compose: demo/compose.yaml

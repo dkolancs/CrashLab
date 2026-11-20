@@ -1,0 +1,18 @@
+name: ci-smoke
+target:
+  service: payment-service
+fault:
+  type: latency
+  delay: 20ms
+experiment:
+  baseline: 5s
+  duration: 8s
+  recovery: 5s
+entry:
+  url: http://127.0.0.1:8081/checkout
+  service: storefront
+compose: demo/compose.yaml
+expect:
+  error_rate: "< 20%"
+  p95_latency: "< 1000ms"
+  recovery_time: "< 10s"

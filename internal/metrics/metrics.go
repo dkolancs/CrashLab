@@ -44,6 +44,14 @@ type statsBody struct {
 	DownstreamLatencyMS float64 `json:"downstream_latency_ms"`
 }
 
+type traceEdge struct {
+	ID        string    `json:"id"`
+	From      string    `json:"from"`
+	To        string    `json:"to"`
+	LatencyMs float64   `json:"latencyMs"`
+	At        time.Time `json:"at"`
+}
+
 // GenerateLoad issues a steady 10 requests per second until ctx is canceled.
 // The rate stays open-loop so retries inside the app show up as extra downstream traffic.
 func GenerateLoad(ctx context.Context, url, service string, phase *Phase, out chan<- model.Sample) {
@@ -105,17 +113,33 @@ func Scrape(ctx context.Context, cli *client.Client, services []model.Service, p
 	httpClient := &http.Client{}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	seenTraces := &traceSeen{ids: map[string]bool{}}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sampleOnce(ctx, cli, httpClient, services, phase.Get(), out)
+			sampleOnce(ctx, cli, httpClient, services, phase.Get(), out, seenTraces)
 		}
 	}
 }
 
-func sampleOnce(ctx context.Context, cli *client.Client, httpClient *http.Client, services []model.Service, phase string, out chan<- model.Sample) {
+type traceSeen struct {
+	mu  sync.Mutex
+	ids map[string]bool
+}
+
+func (s *traceSeen) mark(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ids[id] {
+		return false
+	}
+	s.ids[id] = true
+	return true
+}
+
+func sampleOnce(ctx context.Context, cli *client.Client, httpClient *http.Client, services []model.Service, phase string, out chan<- model.Sample, seenTraces *traceSeen) {
 	var wg sync.WaitGroup
 	for _, svc := range services {
 		svc := svc
@@ -130,6 +154,19 @@ func sampleOnce(ctx context.Context, cli *client.Client, httpClient *http.Client
 					send(ctx, out, model.Sample{At: now, Phase: phase, Source: model.SourceStats, Service: svc.Name, Name: model.MetricRequests, Value: body.Requests})
 					send(ctx, out, model.Sample{At: now, Phase: phase, Source: model.SourceStats, Service: svc.Name, Name: model.MetricErrors, Value: body.Errors})
 				}
+				for _, edge := range fetchTraces(ctx, httpClient, base+"/traces") {
+					if edge.ID == "" || !seenTraces.mark(edge.ID) {
+						continue
+					}
+					at := edge.At
+					if at.IsZero() {
+						at = now
+					}
+					send(ctx, out, model.Sample{
+						At: at, Phase: phase, Source: model.SourceTrace, Service: edge.From + ">" + edge.To,
+						Name: model.MetricTrace, Value: edge.LatencyMs,
+					})
+				}
 			}
 			if svc.ContainerID == "" || cli == nil {
 				return
@@ -140,6 +177,28 @@ func sampleOnce(ctx context.Context, cli *client.Client, httpClient *http.Client
 		}()
 	}
 	wg.Wait()
+}
+
+func fetchTraces(ctx context.Context, client *http.Client, url string) []traceEdge {
+	ctx, cancel := context.WithTimeout(ctx, 700*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var edges []traceEdge
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&edges); err != nil {
+		return nil
+	}
+	return edges
 }
 
 func fetchStats(ctx context.Context, client *http.Client, url string) (statsBody, bool) {
