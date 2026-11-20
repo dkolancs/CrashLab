@@ -16,14 +16,16 @@ type fileSpec struct {
 		Service string `yaml:"service"`
 	} `yaml:"target"`
 	Fault struct {
-		Type    string  `yaml:"type"`
-		Delay   string  `yaml:"delay"`
-		Percent float64 `yaml:"percent"`
+		Type       string  `yaml:"type"`
+		Delay      string  `yaml:"delay"`
+		Percent    float64 `yaml:"percent"`
+		Privileged bool    `yaml:"privileged"`
 	} `yaml:"fault"`
 	Experiment struct {
 		Baseline string `yaml:"baseline"`
 		Duration string `yaml:"duration"`
 		Recovery string `yaml:"recovery"`
+		Timeout  string `yaml:"timeout"`
 	} `yaml:"experiment"`
 	Entry struct {
 		URL     string `yaml:"url"`
@@ -45,15 +47,16 @@ func ParseFile(path string) (Spec, error) {
 		return Spec{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	spec := Spec{
-		Name:         file.Name,
-		Target:       file.Target.Service,
-		FaultType:    file.Fault.Type,
-		LossPercent:  file.Fault.Percent,
-		CPUPercent:   file.Fault.Percent,
-		EntryURL:     file.Entry.URL,
-		EntryService: file.Entry.Service,
-		ComposeFile:  file.Compose,
-		Project:      file.Project,
+		Name:            file.Name,
+		Target:          file.Target.Service,
+		FaultType:       file.Fault.Type,
+		LossPercent:     file.Fault.Percent,
+		CPUPercent:      file.Fault.Percent,
+		EntryURL:        file.Entry.URL,
+		EntryService:    file.Entry.Service,
+		ComposeFile:     file.Compose,
+		Project:         file.Project,
+		AllowPrivileged: file.Fault.Privileged,
 	}
 	if file.Fault.Type == model.FaultCPU {
 		spec.LossPercent = 0
@@ -76,6 +79,9 @@ func ParseFile(path string) (Spec, error) {
 	}
 	if spec.Recovery, err = parseOptional(file.Experiment.Recovery); err != nil {
 		return Spec{}, fmt.Errorf("recovery: %w", err)
+	}
+	if spec.Timeout, err = parseOptional(file.Experiment.Timeout); err != nil {
+		return Spec{}, fmt.Errorf("timeout: %w", err)
 	}
 	if file.Expect["mode"] == "fail" {
 		spec.ExpectFailure = true

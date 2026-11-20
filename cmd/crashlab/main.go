@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -58,7 +59,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `CrashLab discovers a Docker Compose app, injects network latency, and reports how it propagates.
 
 Usage:
-  crashlab run [--compose demo/compose.yaml] [--addr :8080]
+  crashlab run [--compose demo/compose.yaml] [--addr 127.0.0.1:8080]
   crashlab experiment run --target payment-service --delay 800ms
   crashlab experiment run experiments/payment-latency.yaml
   crashlab inject latency payment-service --delay 800ms
@@ -75,7 +76,7 @@ Usage:
 func runCmd(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	compose := fs.String("compose", "demo/compose.yaml", "compose file")
-	addr := fs.String("addr", ":8080", "API listen address")
+	addr := fs.String("addr", api.DefaultListenAddr, "API listen address")
 	dbPath := fs.String("db", "crashlab.db", "sqlite database")
 	netem := fs.String("netem", "netem", "netem helper directory")
 	project := fs.String("project", "", "compose project name override")
@@ -141,6 +142,7 @@ func experimentCmd(args []string) int {
 	recovery := fs.Duration("recovery", 0, "recovery window")
 	entry := fs.String("entry", "", "load generator URL")
 	entryService := fs.String("entry-service", "", "service name for entry traffic")
+	privileged := fs.Bool("privileged", false, "allow a privileged helper retry")
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
@@ -189,15 +191,22 @@ func experimentCmd(args []string) int {
 	if *entryService != "" {
 		spec.EntryService = *entryService
 	}
-	return runSpec(*dbPath, spec)
+	if *privileged {
+		spec.AllowPrivileged = true
+	}
+	_, err := runSpec(*dbPath, "", spec)
+	if err != nil {
+		return 1
+	}
+	return 0
 }
 
-func runSpec(dbPath string, spec experiment.Spec) int {
+func runSpec(dbPath, outDir string, spec experiment.Spec) (model.Experiment, error) {
 	spec = experiment.ApplyDefaults(spec)
 	db, err := store.Open(dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return 1
+		return model.Experiment{}, err
 	}
 	defer db.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -205,15 +214,20 @@ func runSpec(dbPath string, spec experiment.Spec) int {
 	experiment.ReconcileOpen(ctx, db)
 	runner := &experiment.Runner{Store: db}
 	exp, err := runner.Run(ctx, spec)
-	text, _, ok, getErr := db.GetResult(exp.ID)
+	text, summary, ok, getErr := db.GetResult(exp.ID)
 	if getErr == nil && ok {
 		fmt.Print(text)
+		if outDir != "" {
+			if writeErr := writeReportFiles(outDir, exp, text, summary); writeErr != nil {
+				fmt.Fprintf(os.Stderr, "report export: %v\n", writeErr)
+			}
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "experiment failed: %v\n", err)
-		return 1
+		return exp, err
 	}
-	return 0
+	return exp, nil
 }
 
 func injectCmd(args []string) int {
@@ -228,6 +242,7 @@ func injectCmd(args []string) int {
 	delay := fs.String("delay", "800ms", "latency")
 	percent := fs.Float64("percent", 0, "loss or cpu percent")
 	allowUntracked := fs.Bool("allow-untracked", false, "inject without an experiment record")
+	privileged := fs.Bool("privileged", false, "allow a privileged helper retry")
 	if err := fs.Parse(args[2:]); err != nil {
 		return 2
 	}
@@ -255,7 +270,7 @@ func injectCmd(args []string) int {
 		if err := fault.Prepare(ctx, "netem"); err != nil {
 			return err
 		}
-		return fault.Apply(ctx, cli, id, fault.Request{Kind: kind, Delay: parsedDelay, Percent: *percent})
+		return fault.Apply(ctx, cli, id, fault.Request{Kind: kind, Delay: parsedDelay, Percent: *percent, AllowPrivileged: *privileged})
 	})
 }
 
@@ -267,6 +282,7 @@ func clearCmd(args []string) int {
 	fs := flag.NewFlagSet("clear", flag.ContinueOnError)
 	compose := fs.String("compose", "demo/compose.yaml", "compose file")
 	project := fs.String("project", "", "compose project")
+	privileged := fs.Bool("privileged", false, "allow a privileged helper retry")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -279,7 +295,7 @@ func clearCmd(args []string) int {
 		if err := fault.Prepare(ctx, "netem"); err != nil {
 			return err
 		}
-		return fault.Clear(ctx, cli, id)
+		return fault.ClearOptions(ctx, cli, id, fault.Options{AllowPrivileged: *privileged})
 	})
 }
 
@@ -289,6 +305,9 @@ func testCmd(args []string) int {
 	baseline := fs.String("baseline", "", "override baseline duration")
 	duration := fs.String("duration", "", "override fault duration")
 	recovery := fs.String("recovery", "", "override recovery duration")
+	outDir := fs.String("out", "", "write each report as text and JSON")
+	shared := fs.Bool("shared-baseline", false, "reuse the first run's baseline samples")
+	privileged := fs.Bool("privileged", false, "allow a privileged helper retry")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -302,6 +321,7 @@ func testCmd(args []string) int {
 		return 2
 	}
 	failed := false
+	var sharedID int64
 	for _, file := range files {
 		fmt.Printf("== %s\n", file)
 		spec, err := experiment.ParseFile(file)
@@ -315,7 +335,22 @@ func testCmd(args []string) int {
 			failed = true
 			continue
 		}
-		if runSpec(*dbPath, spec) != 0 {
+		if *privileged {
+			spec.AllowPrivileged = true
+		}
+		if *shared && sharedID != 0 {
+			spec.SkipBaseline = true
+			spec.SharedBaselineID = sharedID
+		}
+		exp, runErr := runSpec(*dbPath, *outDir, spec)
+		if sharedID == 0 && exp.ID != 0 {
+			sharedID = exp.ID
+		}
+		if runErr != nil && suiteShouldStop(runErr.Error()) {
+			fmt.Fprintf(os.Stderr, "suite stopped after cleanup failure\n")
+			return 1
+		}
+		if runErr != nil {
 			failed = true
 		}
 	}
@@ -323,6 +358,31 @@ func testCmd(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func suiteShouldStop(errText string) bool {
+	return strings.Contains(errText, "cleanup failed")
+}
+
+func writeReportFiles(dir string, exp model.Experiment, text, summary string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	name := exp.Name
+	if name == "" {
+		name = "experiment"
+	}
+	name = strings.Map(func(r rune) rune {
+		if r == '/' || r == ' ' {
+			return '-'
+		}
+		return r
+	}, name)
+	base := filepath.Join(dir, fmt.Sprintf("%s-%03d", name, exp.ID))
+	if err := os.WriteFile(base+".txt", []byte(text), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(base+".json", []byte(summary), 0o644)
 }
 
 func applyDurationOverrides(spec *experiment.Spec, baseline, duration, recovery string) error {
@@ -370,6 +430,7 @@ func experimentFiles(path string) ([]string, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("no experiment files in %s", path)
 	}
+	sort.Strings(files)
 	return files, nil
 }
 
@@ -403,6 +464,7 @@ func withTarget(compose, project, service string, fn func(context.Context, strin
 func reportCmd(args []string) int {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
 	dbPath := fs.String("db", "crashlab.db", "sqlite database")
+	outDir := fs.String("out", "", "write the text report and JSON outcome")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -421,7 +483,7 @@ func reportCmd(args []string) int {
 		return 1
 	}
 	defer db.Close()
-	text, _, ok, err := db.GetResult(id)
+	text, summary, ok, err := db.GetResult(id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
@@ -431,6 +493,17 @@ func reportCmd(args []string) int {
 		return 1
 	}
 	fmt.Print(text)
+	if *outDir != "" {
+		exp, err := db.GetExperiment(id)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			return 1
+		}
+		if err := writeReportFiles(*outDir, exp, text, summary); err != nil {
+			fmt.Fprintf(os.Stderr, "report export: %v\n", err)
+			return 1
+		}
+	}
 	return 0
 }
 

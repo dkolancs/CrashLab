@@ -75,6 +75,11 @@ func Format(exp model.Experiment, out Outcome, events []model.Event) string {
 	if out.RetryFactor >= 2 {
 		fmt.Fprintf(&b, "Target receive rate: %.1fx baseline\n", out.RetryFactor)
 	}
+	if out.Regression != "" {
+		fmt.Fprintf(&b, "\nREGRESSION\n")
+		fmt.Fprintf(&b, "────────────────────────────\n")
+		fmt.Fprintf(&b, "%s\n", out.Regression)
+	}
 	if out.Explanation != "" {
 		fmt.Fprintf(&b, "\nEXPLANATION\n")
 		fmt.Fprintf(&b, "────────────────────────────\n")

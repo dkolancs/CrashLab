@@ -201,6 +201,30 @@ FROM experiments ORDER BY id DESC LIMIT ?`, limit)
 	return out, rows.Err()
 }
 
+// ListNamedExperiments returns older completed runs of one experiment name, newest first.
+func (s *Store) ListNamedExperiments(name string, beforeID int64) ([]model.Experiment, error) {
+	rows, err := s.db.Query(`
+SELECT id, name, status, phase, target, delay_ms, baseline_ms, duration_ms, recovery_ms,
+       entry_url, entry_service, compose_file, project, started_at, finished_at, error,
+       fault_type, loss_percent, cpu_percent, expect_failure
+FROM experiments
+WHERE name = ? AND id < ? AND status = ?
+ORDER BY id DESC LIMIT 20`, name, beforeID, model.StatusCompleted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Experiment
+	for rows.Next() {
+		exp, err := scanExperiment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, exp)
+	}
+	return out, rows.Err()
+}
+
 // LatestExperiment returns the newest experiment if one exists.
 func (s *Store) LatestExperiment() (model.Experiment, bool, error) {
 	list, err := s.ListExperiments(1)

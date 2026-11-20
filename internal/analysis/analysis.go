@@ -58,6 +58,7 @@ type Outcome struct {
 	Assertions    []AssertionResult `json:"assertions"`
 	OfferedRate   float64           `json:"offeredRate"`
 	CompletedRate float64           `json:"completedRate"`
+	Regression    string            `json:"regression,omitempty"`
 	Derived       []model.Event     `json:"-"`
 }
 
@@ -82,6 +83,7 @@ type request struct {
 // Evaluate compares baseline, failure, and recovery for one experiment.
 // Propagation is timestamp correlation along declared dependencies, not proof of causation.
 func Evaluate(exp model.Experiment, samples []model.Sample, services []model.Service, injectedAt, removedAt time.Time) Outcome {
+	samples = filterTraceWindow(samples, injectedAt, removedAt)
 	services = mergeTraceDependencies(services, samples)
 	reqs := dropBaselineWarmup(pairRequests(samples, exp.EntryService, model.SourceLoad), 2*time.Second)
 	out := Outcome{

@@ -22,9 +22,15 @@ const ImageName = "crashlab-netem:local"
 
 // Request is one fault to apply to a container.
 type Request struct {
-	Kind    string
-	Delay   time.Duration
-	Percent float64
+	Kind            string
+	Delay           time.Duration
+	Percent         float64
+	AllowPrivileged bool
+}
+
+// Options controls fault cleanup.
+type Options struct {
+	AllowPrivileged bool
 }
 
 // Prepare builds the local netem helper image when it is missing.
@@ -46,9 +52,9 @@ func Prepare(ctx context.Context, dir string) error {
 func Apply(ctx context.Context, cli *client.Client, containerID string, req Request) error {
 	switch req.Kind {
 	case "", "latency":
-		return Inject(ctx, cli, containerID, req.Delay.String())
+		return injectLatency(ctx, cli, containerID, req.Delay.String(), req.AllowPrivileged)
 	case "loss":
-		return injectLoss(ctx, cli, containerID, req.Percent)
+		return injectLoss(ctx, cli, containerID, req.Percent, req.AllowPrivileged)
 	case "kill":
 		return cli.ContainerKill(ctx, containerID, "SIGKILL")
 	case "cpu":
@@ -62,7 +68,11 @@ func Apply(ctx context.Context, cli *client.Client, containerID string, req Requ
 // The qdisc remains after the helper exits. Delay is a tc duration such as 800ms.
 // Kernels built without sch_netem get a same-namespace delay proxy instead.
 func Inject(ctx context.Context, cli *client.Client, containerID, delay string) error {
-	out, err := run(ctx, cli, containerID, "inject", delay)
+	return injectLatency(ctx, cli, containerID, delay, false)
+}
+
+func injectLatency(ctx context.Context, cli *client.Client, containerID, delay string, allowPrivileged bool) error {
+	out, err := run(ctx, cli, containerID, allowPrivileged, "inject", delay)
 	if err == nil {
 		return nil
 	}
@@ -71,7 +81,7 @@ func Inject(ctx context.Context, cli *client.Client, containerID, delay string) 
 	}
 	port := servicePort(ctx, cli, containerID)
 	log.Printf("kernel has no sch_netem; delaying %s port %d with a network-namespace proxy", short(containerID), port)
-	if err := startFallback(ctx, cli, containerID, delay, port); err != nil {
+	if err := startFallback(ctx, cli, containerID, delay, port, allowPrivileged); err != nil {
 		return fmt.Errorf("inject latency on %s: %w", short(containerID), err)
 	}
 	return nil
@@ -88,10 +98,15 @@ type clearActions struct {
 // Clear removes network faults, stops CPU stress, and starts a container that was terminated.
 // Every step runs even when an earlier step fails.
 func Clear(ctx context.Context, cli *client.Client, containerID string) error {
+	return ClearOptions(ctx, cli, containerID, Options{})
+}
+
+// ClearOptions removes a fault. A privileged helper retry runs only when AllowPrivileged is set.
+func ClearOptions(ctx context.Context, cli *client.Client, containerID string, opts Options) error {
 	return performClear(clearActions{
 		running: func() (bool, error) { return containerRunning(ctx, cli, containerID) },
 		netem: func() error {
-			_, err := run(ctx, cli, containerID, "clear")
+			_, err := run(ctx, cli, containerID, opts.AllowPrivileged, "clear")
 			return err
 		},
 		fallback: func() error { return stopFallback(ctx, cli, containerID) },
@@ -140,8 +155,8 @@ func containerRunning(ctx context.Context, cli *client.Client, containerID strin
 	return inspected.State != nil && inspected.State.Running, nil
 }
 
-func injectLoss(ctx context.Context, cli *client.Client, containerID string, percent float64) error {
-	out, err := run(ctx, cli, containerID, "inject-loss", fmt.Sprintf("%g", percent))
+func injectLoss(ctx context.Context, cli *client.Client, containerID string, percent float64, allowPrivileged bool) error {
+	out, err := run(ctx, cli, containerID, allowPrivileged, "inject-loss", fmt.Sprintf("%g", percent))
 	if err == nil {
 		return nil
 	}
@@ -150,7 +165,7 @@ func injectLoss(ctx context.Context, cli *client.Client, containerID string, per
 	}
 	port := servicePort(ctx, cli, containerID)
 	log.Printf("kernel has no sch_netem; dropping %.0f%% of connections to %s port %d", percent, short(containerID), port)
-	return startFallbackMode(ctx, cli, containerID, "fallback-loss", fmt.Sprintf("%g", percent), port)
+	return startFallbackMode(ctx, cli, containerID, "fallback-loss", fmt.Sprintf("%g", percent), port, allowPrivileged)
 }
 
 func ensureRunning(ctx context.Context, cli *client.Client, containerID string) error {
@@ -179,7 +194,7 @@ func ensureRunning(ctx context.Context, cli *client.Client, containerID string) 
 
 // Show returns the target interface qdisc, used to confirm the fault is gone.
 func Show(ctx context.Context, cli *client.Client, containerID string) (string, error) {
-	out, err := run(ctx, cli, containerID, "show")
+	out, err := run(ctx, cli, containerID, false, "show")
 	if err != nil {
 		return out, fmt.Errorf("show qdisc on %s: %w\n%s", short(containerID), err, out)
 	}
@@ -221,11 +236,11 @@ func servicePort(ctx context.Context, cli *client.Client, containerID string) in
 	return 8080
 }
 
-func startFallback(ctx context.Context, cli *client.Client, containerID, delay string, port int) error {
-	return startFallbackMode(ctx, cli, containerID, "fallback", delay, port)
+func startFallback(ctx context.Context, cli *client.Client, containerID, delay string, port int, allowPrivileged bool) error {
+	return startFallbackMode(ctx, cli, containerID, "fallback", delay, port, allowPrivileged)
 }
 
-func startFallbackMode(ctx context.Context, cli *client.Client, containerID, mode, arg string, port int) error {
+func startFallbackMode(ctx context.Context, cli *client.Client, containerID, mode, arg string, port int, allowPrivileged bool) error {
 	if err := stopFallback(ctx, cli, containerID); err != nil {
 		return err
 	}
@@ -233,9 +248,10 @@ func startFallbackMode(ctx context.Context, cli *client.Client, containerID, mod
 	if err == nil {
 		return nil
 	}
-	if !needsPrivilege(out) && !needsPrivilege(err.Error()) {
+	if !allowPrivilegedRetry(allowPrivileged, out+" "+err.Error()) {
 		return err
 	}
+	log.Printf("retrying delay proxy privileged because it was requested")
 	_, err = startFallbackOnce(ctx, cli, containerID, mode, arg, port, true)
 	return err
 }
@@ -300,15 +316,20 @@ func stopFallback(ctx context.Context, cli *client.Client, containerID string) e
 	return first
 }
 
-func run(ctx context.Context, cli *client.Client, containerID string, args ...string) (string, error) {
+func run(ctx context.Context, cli *client.Client, containerID string, allowPrivileged bool, args ...string) (string, error) {
 	out, err := runOnce(ctx, cli, containerID, false, args...)
 	if err == nil {
 		return out, nil
 	}
-	if !needsPrivilege(out) && !needsPrivilege(err.Error()) {
+	if !allowPrivilegedRetry(allowPrivileged, out+" "+err.Error()) {
 		return out, err
 	}
+	log.Printf("retrying netem helper privileged because it was requested")
 	return runOnce(ctx, cli, containerID, true, args...)
+}
+
+func allowPrivilegedRetry(enabled bool, msg string) bool {
+	return enabled && needsPrivilege(msg)
 }
 
 func runOnce(ctx context.Context, cli *client.Client, containerID string, privileged bool, args ...string) (string, error) {
