@@ -88,6 +88,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/compare", s.compare)
 	mux.HandleFunc("GET /api/suggestions", s.suggestions)
 	mux.HandleFunc("POST /api/experiments", s.create)
+	mux.HandleFunc("POST /api/experiments/{id}/stop", s.stop)
 	mux.HandleFunc("GET /api/experiments/{id}/stream", s.stream)
 	mux.HandleFunc("GET /api/experiments/{id}/report", s.report)
 	mux.HandleFunc("GET /api/experiments/{id}", s.get)
@@ -203,6 +204,25 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, text)
+}
+
+func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	exp, err := s.Store.GetExperiment(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if exp.Status != model.StatusRunning {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "experiment is not running", "status": exp.Status})
+		return
+	}
+	s.Runner.Stop()
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "status": "stopping"})
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {

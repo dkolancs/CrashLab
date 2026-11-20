@@ -38,7 +38,7 @@ func TestExplainCitesNumbers(t *testing.T) {
 	ms := int64(300)
 	text := Explain(model.Experiment{Target: "payment-service", FaultType: model.FaultLatency, Delay: 800 * 1000000}, Outcome{
 		Baseline:    Window{P95: 33, ErrorRate: 0, Count: 10},
-		Failure:     Window{P95: 1600, ErrorRate: 1, Count: 10},
+		Failure:     Window{P95: 1600, ErrorRate: 1, Count: 10, SuccessCount: 10},
 		Degraded:    true,
 		RecoveryMs:  &ms,
 		RetryFactor: 4,

@@ -28,3 +28,12 @@ jobs:
           exit 1
       - name: Reliability smoke test
         run: go run ./cmd/crashlab test --db crashlab.db experiments/ci-smoke.yaml
+      - name: Strict latency experiment fails its assertions
+        run: |
+          set +e
+          go run ./cmd/crashlab experiment run experiments/payment-latency.yaml --baseline 5s --duration 8s --recovery 5s --db crashlab-strict.db > /tmp/strict.txt
+          code=$?
+          set -e
+          cat /tmp/strict.txt
+          test "$code" -ne 0
+          grep -q "Experiment FAILED" /tmp/strict.txt

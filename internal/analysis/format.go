@@ -60,10 +60,12 @@ func Format(exp model.Experiment, out Outcome, events []model.Event) string {
 	fmt.Fprintf(&b, "\nRESULT\n")
 	fmt.Fprintf(&b, "────────────────────────────\n")
 	fmt.Fprintf(&b, "%s\n", out.Conclusion)
-	if out.RecoveryMs != nil {
-		sec := float64(*out.RecoveryMs) / 1000
-		fmt.Fprintf(&b, "Recovery time: %.1f seconds\n", sec)
-	} else if out.Degraded {
+	switch {
+	case out.Conclusion == "Not enough data":
+		fmt.Fprintf(&b, "Recovery time: not enough data\n")
+	case out.RecoveryMs != nil:
+		fmt.Fprintf(&b, "Recovery time: %.1f seconds\n", float64(*out.RecoveryMs)/1000)
+	case out.Degraded:
 		fmt.Fprintf(&b, "Recovery time: not observed\n")
 	}
 	if out.RetryFactor >= 2 {
@@ -112,10 +114,17 @@ func faultDescription(exp model.Experiment) string {
 }
 
 func writeWindow(b *strings.Builder, title string, w Window, cpu float64) {
+	p50, p95 := "n/a", "n/a"
+	if w.SuccessCount > 0 {
+		p50, p95 = formatLatency(w.P50), formatLatency(w.P95)
+	}
 	fmt.Fprintf(b, "%s\n", title)
 	fmt.Fprintf(b, "────────────────────────────\n")
-	fmt.Fprintf(b, "%-16s %s\n", "p50 latency", formatLatency(w.P50))
-	fmt.Fprintf(b, "%-16s %s\n", "p95 latency", formatLatency(w.P95))
+	fmt.Fprintf(b, "%-16s %s\n", "p50 latency", p50)
+	fmt.Fprintf(b, "%-16s %s\n", "p95 latency", p95)
+	if w.Count > w.SuccessCount && w.Count > 0 {
+		fmt.Fprintf(b, "%-16s %s\n", "p95 all", formatLatency(w.P95All))
+	}
 	fmt.Fprintf(b, "%-16s %s\n", "error rate", formatPercent(w.ErrorRate))
 	if cpu > 0 {
 		fmt.Fprintf(b, "%-16s %.0f%%\n", "cpu", cpu)

@@ -305,9 +305,10 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 		runErr = err
 		return
 	}
+	deadline := injectedAt.Add(spec.Duration + spec.Recovery + 30*time.Second)
 	if err := r.Store.UpsertFault(model.Fault{
-		ExperimentID: exp.ID, Service: spec.Target, Type: spec.FaultType, Delay: spec.Delay,
-		LossPercent: spec.LossPercent, CPUPercent: spec.CPUPercent, InjectedAt: &injectedAt,
+		ExperimentID: exp.ID, Service: spec.Target, ContainerID: targetID, Type: spec.FaultType, Delay: spec.Delay,
+		LossPercent: spec.LossPercent, CPUPercent: spec.CPUPercent, InjectedAt: &injectedAt, Deadline: &deadline,
 	}); err != nil {
 		stopCollectors()
 		runErr = err
@@ -342,6 +343,7 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 	}
 	log.Printf("experiment %d phase=remove", exp.ID)
 	removedAt := time.Now().UTC()
+	clearedID := targetID
 	if err := fault.Clear(ctx, cli, targetID); err != nil {
 		stopCollectors()
 		runErr = err
@@ -355,6 +357,11 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 	faultRow.Delay = spec.Delay
 	faultRow.LossPercent = spec.LossPercent
 	faultRow.CPUPercent = spec.CPUPercent
+	faultRow.ContainerID = clearedID
+	if faultRow.Deadline == nil {
+		deadline := injectedAt.Add(spec.Duration + spec.Recovery + 30*time.Second)
+		faultRow.Deadline = &deadline
+	}
 	if faultRow.InjectedAt == nil {
 		faultRow.InjectedAt = &injectedAt
 	}
@@ -526,6 +533,38 @@ func (r *Runner) fail(id int64, reason error) {
 	exp.FinishedAt = &now
 	if err := r.Store.UpdateExperiment(exp); err != nil {
 		log.Printf("experiment %d: %v", id, err)
+	}
+}
+
+// ReconcileOpen clears faults left behind when a CrashLab process stopped mid-run.
+func ReconcileOpen(ctx context.Context, db *store.Store) {
+	open, err := db.ListOpenFaults()
+	if err != nil {
+		log.Printf("reconcile: %v", err)
+		return
+	}
+	if len(open) == 0 {
+		return
+	}
+	cli, err := dockerx.New()
+	if err != nil {
+		log.Printf("reconcile: %v", err)
+		return
+	}
+	defer cli.Close()
+	for _, f := range open {
+		if f.ContainerID == "" {
+			continue
+		}
+		log.Printf("clearing leftover fault on %s from experiment %d", f.Service, f.ExperimentID)
+		if err := fault.Clear(ctx, cli, f.ContainerID); err != nil {
+			log.Printf("reconcile %s: %v", f.Service, err)
+		}
+		removed := time.Now().UTC()
+		f.RemovedAt = &removed
+		if err := db.UpsertFault(f); err != nil {
+			log.Printf("reconcile save: %v", err)
+		}
 	}
 }
 

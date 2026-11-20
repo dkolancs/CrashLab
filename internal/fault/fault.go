@@ -3,6 +3,7 @@ package fault
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -76,25 +77,59 @@ func Inject(ctx context.Context, cli *client.Client, containerID, delay string) 
 	return nil
 }
 
+type clearActions struct {
+	running  func() (bool, error)
+	netem    func() error
+	fallback func() error
+	cpu      func() error
+	start    func() error
+}
+
 // Clear removes network faults, stops CPU stress, and starts a container that was terminated.
+// Every step runs even when an earlier step fails.
 func Clear(ctx context.Context, cli *client.Client, containerID string) error {
-	running, err := containerRunning(ctx, cli, containerID)
-	if err != nil {
-		return err
+	return performClear(clearActions{
+		running: func() (bool, error) { return containerRunning(ctx, cli, containerID) },
+		netem: func() error {
+			_, err := run(ctx, cli, containerID, "clear")
+			return err
+		},
+		fallback: func() error { return stopFallback(ctx, cli, containerID) },
+		cpu:      func() error { return stopCPU(ctx, cli, containerID) },
+		start:    func() error { return ensureRunning(ctx, cli, containerID) },
+	})
+}
+
+func performClear(actions clearActions) error {
+	var running bool
+	var runningErr error
+	if actions.running != nil {
+		running, runningErr = actions.running()
 	}
-	if running {
-		out, err := run(ctx, cli, containerID, "clear")
+	var netemErr, fallbackErr, cpuErr, startErr error
+	if running && actions.netem != nil {
+		netemErr = actions.netem()
+	}
+	if actions.fallback != nil {
+		fallbackErr = actions.fallback()
+	}
+	if actions.cpu != nil {
+		cpuErr = actions.cpu()
+	}
+	if actions.start != nil {
+		startErr = actions.start()
+	}
+	return joinClearErrors(runningErr, netemErr, fallbackErr, cpuErr, startErr)
+}
+
+func joinClearErrors(errs ...error) error {
+	var out []error
+	for _, err := range errs {
 		if err != nil {
-			return fmt.Errorf("clear latency on %s: %w\n%s", short(containerID), err, out)
-		}
-		if err := stopFallback(ctx, cli, containerID); err != nil {
-			return err
-		}
-		if err := stopCPU(ctx, cli, containerID); err != nil {
-			return err
+			out = append(out, err)
 		}
 	}
-	return ensureRunning(ctx, cli, containerID)
+	return errors.Join(out...)
 }
 
 func containerRunning(ctx context.Context, cli *client.Client, containerID string) (bool, error) {

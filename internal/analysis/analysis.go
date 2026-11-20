@@ -10,11 +10,17 @@ import (
 )
 
 // Window is a latency and error summary for one phase.
+// MinSamples is the smallest baseline and failure sample count that can judge a fault.
+const MinSamples = 10
+
 type Window struct {
-	P50       float64 `json:"p50"`
-	P95       float64 `json:"p95"`
-	ErrorRate float64 `json:"errorRate"`
-	Count     int     `json:"count"`
+	P50          float64 `json:"p50"`
+	P95          float64 `json:"p95"`
+	P50All       float64 `json:"p50All"`
+	P95All       float64 `json:"p95All"`
+	ErrorRate    float64 `json:"errorRate"`
+	Count        int     `json:"count"`
+	SuccessCount int     `json:"successCount"`
 }
 
 // Hop is one service in a timestamp-correlated propagation chain.
@@ -26,9 +32,10 @@ type Hop struct {
 
 // Bucket is one second of user-facing latency for the chart.
 type Bucket struct {
-	At        time.Time `json:"t"`
-	P95       float64   `json:"p95"`
-	ErrorRate float64   `json:"errorRate"`
+	At           time.Time `json:"t"`
+	P95          float64   `json:"p95"`
+	ErrorRate    float64   `json:"errorRate"`
+	SuccessCount int       `json:"successCount"`
 }
 
 // Outcome is the measured result of an experiment.
@@ -80,25 +87,29 @@ func Evaluate(exp model.Experiment, samples []model.Sample, services []model.Ser
 			out.NodeStates[hop.Service] = "degraded"
 		}
 	}
-	if dur, at, ok := recoveryTime(reqs, removedAt, out.Baseline); ok {
-		ms := dur.Milliseconds()
-		out.RecoveryMs = &ms
-		out.RecoveredAt = at
+	enough := out.Baseline.Count >= MinSamples && out.Failure.Count >= MinSamples
+	if enough {
+		if dur, at, ok := recoveryTime(reqs, removedAt, out.Baseline); ok {
+			ms := dur.Milliseconds()
+			out.RecoveryMs = &ms
+			out.RecoveredAt = at
+		}
 	}
 	out.RetryFactor, _, _ = retryFactor(samples, exp.Target, injectedAt, removedAt)
 	out.CPUBaseline = meanMetric(samples, exp.Target, model.SourceDocker, model.MetricCPU, model.PhaseBaseline)
 	out.CPUFailure = meanMetric(samples, exp.Target, model.SourceDocker, model.MetricCPU, model.PhaseObserve)
 
-	latencyUp := out.Baseline.Count > 0 && out.Failure.P95 >= out.Baseline.P95*2 && out.Failure.P95 > out.Baseline.P95+20
-	errorsUp := out.Failure.Count > 0 && out.Failure.ErrorRate >= out.Baseline.ErrorRate+0.05
+	latencyUp := enough && out.Baseline.SuccessCount > 0 && out.Failure.SuccessCount > 0 &&
+		out.Failure.P95 >= out.Baseline.P95*2 && out.Failure.P95 > out.Baseline.P95+20
+	errorsUp := enough && out.Failure.ErrorRate >= out.Baseline.ErrorRate+0.05
 	out.Degraded = latencyUp || errorsUp
 	switch {
+	case !enough:
+		out.Conclusion = "Not enough data"
 	case out.Degraded && out.RecoveryMs != nil:
 		out.Conclusion = "System degraded significantly."
 	case out.Degraded:
 		out.Conclusion = "System degraded and did not return to baseline."
-	case out.Baseline.Count == 0 || out.Failure.Count == 0:
-		out.Conclusion = "Not enough request samples to judge the fault."
 	default:
 		out.Conclusion = "System tolerated the fault."
 	}
@@ -455,7 +466,7 @@ func pointRate(pts []counterPoint) float64 {
 }
 
 func recoveryTime(reqs []request, removedAt time.Time, baseline Window) (time.Duration, time.Time, bool) {
-	if removedAt.IsZero() || baseline.Count == 0 {
+	if removedAt.IsZero() || baseline.Count < MinSamples || baseline.SuccessCount == 0 {
 		return 0, time.Time{}, false
 	}
 	threshold := math.Max(baseline.P95*1.5, baseline.P95+40)
@@ -549,20 +560,27 @@ func summarize(reqs []request) Window {
 	if len(reqs) == 0 {
 		return Window{}
 	}
-	lats := make([]float64, len(reqs))
+	all := make([]float64, len(reqs))
+	var success []float64
 	errs := 0
 	for i, r := range reqs {
-		lats[i] = r.lat
+		all[i] = r.lat
 		if r.err {
 			errs++
+			continue
 		}
+		success = append(success, r.lat)
 	}
-	sort.Float64s(lats)
+	sort.Float64s(all)
+	sort.Float64s(success)
 	return Window{
-		P50:       percentile(lats, 0.50),
-		P95:       percentile(lats, 0.95),
-		ErrorRate: float64(errs) / float64(len(reqs)),
-		Count:     len(reqs),
+		P50:          percentile(success, 0.50),
+		P95:          percentile(success, 0.95),
+		P50All:       percentile(all, 0.50),
+		P95All:       percentile(all, 0.95),
+		ErrorRate:    float64(errs) / float64(len(reqs)),
+		Count:        len(reqs),
+		SuccessCount: len(success),
 	}
 }
 
