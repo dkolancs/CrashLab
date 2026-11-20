@@ -1,0 +1,256 @@
+:root {
+  color-scheme: dark;
+  --bg: #10140f;
+  --bg-2: #171d18;
+  --line: #2c3a30;
+  --text: #e4efe4;
+  --muted: #8ea394;
+  --fault: #ff5a36;
+  --degraded: #e6a23c;
+  --ok: #8fce7a;
+  --accent: #d6ff4a;
+  --shadow: 0 0 0 1px var(--line);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(1200px 500px at 10% -10%, rgba(214, 255, 74, 0.06), transparent 50%),
+    var(--bg);
+  color: var(--text);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+button, input, select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: var(--accent);
+  color: #14200a;
+  border: 0;
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.app {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 20px 64px;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.mark {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+h1 {
+  margin: 4px 0 0;
+  font-size: 32px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.dot.running { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.dot.completed { background: var(--ok); }
+.dot.failed { background: var(--fault); }
+
+.layout {
+  display: grid;
+  grid-template-columns: 390px 1fr;
+  gap: 16px;
+}
+
+.panel {
+  background: rgba(23, 29, 24, 0.92);
+  box-shadow: var(--shadow);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.panel h2 {
+  margin: 0 0 12px;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.stack { display: grid; gap: 16px; }
+
+label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+input, select {
+  background: #0d120e;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+
+.form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.form .wide { grid-column: 1 / -1; }
+
+.graph {
+  width: 100%;
+  min-height: 280px;
+}
+
+.node-name { font-size: 13px; font-weight: 650; }
+.node-state {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.chart { width: 100%; height: 180px; }
+.axis { fill: var(--muted); font-size: 10px; font-family: ui-monospace, monospace; }
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.timeline li {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.timeline time {
+  font-family: ui-monospace, monospace;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.numbers {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.numbers article {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.numbers h3 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.numbers p {
+  margin: 3px 0;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+}
+
+.conclusion {
+  margin-top: 12px;
+  font-size: 18px;
+}
+
+.report {
+  margin-top: 12px;
+  white-space: pre-wrap;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #d5e4d4;
+  background: #0c100d;
+  border-radius: 6px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.warn, .err {
+  color: var(--degraded);
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+
+.err { color: var(--fault); }
+
+.recent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.recent button {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  font-weight: 500;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+@media (max-width: 860px) {
+  .layout, .numbers, .form { grid-template-columns: 1fr; }
+  h1 { font-size: 26px; }
+}

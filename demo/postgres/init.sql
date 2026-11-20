@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS stock (
+  sku TEXT PRIMARY KEY,
+  qty INT NOT NULL
+);
+
+INSERT INTO stock (sku, qty) VALUES ('widget', 42)
+ON CONFLICT (sku) DO NOTHING;
