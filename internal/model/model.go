@@ -40,22 +40,25 @@ const (
 	FaultKill    = "kill"
 	FaultCPU     = "cpu"
 
-	SourceTrace = "trace"
-	MetricTrace = "trace_ms"
+	SourceTrace     = "trace"
+	MetricTrace     = "trace_ms"
+	MetricOffered   = "offered_total"
+	MetricCompleted = "completed_total"
 )
 
 // Service is one Compose service discovered from the Docker daemon.
 type Service struct {
-	Name         string   `json:"name"`
-	ContainerID  string   `json:"containerId"`
-	Image        string   `json:"image"`
-	Ports        []string `json:"ports"`
-	HostPorts    []int    `json:"hostPorts"`
-	Networks     []string `json:"networks"`
-	DependsOn    []string `json:"dependsOn"`
-	Health       string   `json:"health"`
-	Status       string   `json:"status"`
-	RestartCount int      `json:"restartCount"`
+	Name           string   `json:"name"`
+	ContainerID    string   `json:"containerId"`
+	Image          string   `json:"image"`
+	Ports          []string `json:"ports"`
+	HostPorts      []int    `json:"hostPorts"`
+	Networks       []string `json:"networks"`
+	DependsOn      []string `json:"dependsOn"`
+	DependsHealthy []string `json:"dependsHealthy"`
+	Health         string   `json:"health"`
+	Status         string   `json:"status"`
+	RestartCount   int      `json:"restartCount"`
 }
 
 // Topology is the project graph CrashLab draws and faults.
@@ -76,25 +79,26 @@ func (t Topology) ByName(name string) (Service, bool) {
 
 // Experiment is one latency run and its phase machine.
 type Experiment struct {
-	ID           int64
-	Name         string
-	Status       string
-	Phase        string
-	Target       string
-	Delay        time.Duration
-	Baseline     time.Duration
-	Duration     time.Duration
-	Recovery     time.Duration
-	EntryURL     string
-	EntryService string
-	ComposeFile  string
-	Project      string
-	FaultType    string
-	LossPercent  float64
-	CPUPercent   float64
-	StartedAt    time.Time
-	FinishedAt   *time.Time
-	Error        string
+	ID            int64
+	Name          string
+	Status        string
+	Phase         string
+	Target        string
+	Delay         time.Duration
+	Baseline      time.Duration
+	Duration      time.Duration
+	Recovery      time.Duration
+	EntryURL      string
+	EntryService  string
+	ComposeFile   string
+	Project       string
+	FaultType     string
+	LossPercent   float64
+	CPUPercent    float64
+	ExpectFailure bool
+	StartedAt     time.Time
+	FinishedAt    *time.Time
+	Error         string
 }
 
 // Sample is one timestamped measurement.

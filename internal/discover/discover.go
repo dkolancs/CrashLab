@@ -55,16 +55,17 @@ func Inspect(ctx context.Context, cli *client.Client, composePath, project strin
 			continue
 		}
 		svc := model.Service{
-			Name:         name,
-			ContainerID:  inspected.ID,
-			Image:        inspected.Config.Image,
-			DependsOn:    dependencies(labels, graph.Dependencies[name]),
-			Status:       inspected.State.Status,
-			Health:       healthOf(inspected),
-			RestartCount: inspected.RestartCount,
-			Ports:        []string{},
-			HostPorts:    []int{},
-			Networks:     []string{},
+			Name:           name,
+			ContainerID:    inspected.ID,
+			Image:          inspected.Config.Image,
+			DependsOn:      dependencies(labels, graph.Dependencies[name]),
+			DependsHealthy: healthyDependencies(labels),
+			Status:         inspected.State.Status,
+			Health:         healthOf(inspected),
+			RestartCount:   inspected.RestartCount,
+			Ports:          []string{},
+			HostPorts:      []int{},
+			Networks:       []string{},
 		}
 		svc.Ports, svc.HostPorts = publishedPorts(inspected)
 		for network := range inspected.NetworkSettings.Networks {
@@ -134,6 +135,29 @@ func dependencies(labels map[string]string, fromFile []string) []string {
 		return []string{}
 	}
 	return fromFile
+}
+
+func healthyDependencies(labels map[string]string) []string {
+	raw := labels["com.docker.compose.depends_on"]
+	if raw == "" {
+		return []string{}
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '\n' })
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range parts {
+		fields := strings.Split(strings.TrimSpace(part), ":")
+		if len(fields) < 2 || fields[0] == "" || fields[1] != "service_healthy" || seen[fields[0]] {
+			continue
+		}
+		seen[fields[0]] = true
+		out = append(out, fields[0])
+	}
+	sort.Strings(out)
+	if out == nil {
+		return []string{}
+	}
+	return out
 }
 
 // normalizeDepends reads Compose's depends_on label.

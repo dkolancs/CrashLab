@@ -24,6 +24,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /checkout", func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		kit.EnsureTrace(r)
 		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		defer cancel()
 
@@ -39,11 +40,11 @@ func main() {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			stockStatus, stockBody, stockErr = kit.Call(ctx, "storefront", "inventory-service", inventoryURL+"/stock")
+			stockStatus, stockBody, stockErr = kit.Call(ctx, r, "storefront", "inventory-service", inventoryURL+"/stock")
 		}()
 		go func() {
 			defer wg.Done()
-			checkStatus, checkBody, checkErr = kit.Call(ctx, "storefront", "checkout-service", checkoutURL+"/checkout")
+			checkStatus, checkBody, checkErr = kit.Call(ctx, r, "storefront", "checkout-service", checkoutURL+"/checkout")
 		}()
 		wg.Wait()
 

@@ -286,6 +286,9 @@ func clearCmd(args []string) int {
 func testCmd(args []string) int {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	dbPath := fs.String("db", "crashlab.db", "sqlite database")
+	baseline := fs.String("baseline", "", "override baseline duration")
+	duration := fs.String("duration", "", "override fault duration")
+	recovery := fs.String("recovery", "", "override recovery duration")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -307,6 +310,11 @@ func testCmd(args []string) int {
 			failed = true
 			continue
 		}
+		if err := applyDurationOverrides(&spec, *baseline, *duration, *recovery); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			failed = true
+			continue
+		}
 		if runSpec(*dbPath, spec) != 0 {
 			failed = true
 		}
@@ -315,6 +323,26 @@ func testCmd(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func applyDurationOverrides(spec *experiment.Spec, baseline, duration, recovery string) error {
+	var err error
+	if baseline != "" {
+		if spec.Baseline, err = time.ParseDuration(baseline); err != nil {
+			return fmt.Errorf("baseline: %w", err)
+		}
+	}
+	if duration != "" {
+		if spec.Duration, err = time.ParseDuration(duration); err != nil {
+			return fmt.Errorf("duration: %w", err)
+		}
+	}
+	if recovery != "" {
+		if spec.Recovery, err = time.ParseDuration(recovery); err != nil {
+			return fmt.Errorf("recovery: %w", err)
+		}
+	}
+	return nil
 }
 
 func experimentFiles(path string) ([]string, error) {

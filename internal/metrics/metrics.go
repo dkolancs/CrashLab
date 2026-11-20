@@ -60,50 +60,61 @@ func GenerateLoad(ctx context.Context, url, service string, phase *Phase, out ch
 	defer ticker.Stop()
 	var wg sync.WaitGroup
 	var inflight atomic.Int32
+	var offered atomic.Int64
+	var completed atomic.Int64
+	ticks := 0
 	for {
 		select {
 		case <-ctx.Done():
 			wg.Wait()
 			return
 		case <-ticker.C:
-			if inflight.Load() >= 40 {
-				continue
-			}
-			inflight.Add(1)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer inflight.Add(-1)
-				start := time.Now()
-				req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-				if err != nil {
-					return
-				}
-				resp, err := client.Do(req)
-				if ctx.Err() != nil {
+			ticks++
+			offered.Add(1)
+			if inflight.Load() < 40 {
+				inflight.Add(1)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					defer inflight.Add(-1)
+					start := time.Now()
+					req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+					if err != nil {
+						return
+					}
+					resp, err := client.Do(req)
+					if ctx.Err() != nil {
+						if resp != nil {
+							resp.Body.Close()
+						}
+						return
+					}
+					completed.Add(1)
+					latency := float64(time.Since(start).Microseconds()) / 1000
+					failed := err != nil
 					if resp != nil {
+						io.Copy(io.Discard, resp.Body)
 						resp.Body.Close()
+						if resp.StatusCode >= 500 {
+							failed = true
+						}
 					}
-					return
-				}
-				latency := float64(time.Since(start).Microseconds()) / 1000
-				failed := err != nil
-				if resp != nil {
-					io.Copy(io.Discard, resp.Body)
-					resp.Body.Close()
-					if resp.StatusCode >= 500 {
-						failed = true
+					now := time.Now()
+					errValue := 0.0
+					if failed {
+						errValue = 1
 					}
-				}
+					ph := phase.Get()
+					send(ctx, out, model.Sample{At: now, Phase: ph, Source: model.SourceLoad, Service: service, Name: model.MetricLatencyMS, Value: latency})
+					send(ctx, out, model.Sample{At: now, Phase: ph, Source: model.SourceLoad, Service: service, Name: model.MetricError, Value: errValue})
+				}()
+			}
+			if ticks%10 == 0 {
 				now := time.Now()
-				errValue := 0.0
-				if failed {
-					errValue = 1
-				}
 				ph := phase.Get()
-				send(ctx, out, model.Sample{At: now, Phase: ph, Source: model.SourceLoad, Service: service, Name: model.MetricLatencyMS, Value: latency})
-				send(ctx, out, model.Sample{At: now, Phase: ph, Source: model.SourceLoad, Service: service, Name: model.MetricError, Value: errValue})
-			}()
+				send(ctx, out, model.Sample{At: now, Phase: ph, Source: model.SourceLoad, Service: service, Name: model.MetricOffered, Value: float64(offered.Load())})
+				send(ctx, out, model.Sample{At: now, Phase: ph, Source: model.SourceLoad, Service: service, Name: model.MetricCompleted, Value: float64(completed.Load())})
+			}
 		}
 	}
 }

@@ -21,6 +21,10 @@ func Format(exp model.Experiment, out Outcome, events []model.Event) string {
 	fmt.Fprintf(&b, "%s\n\n", humanDuration(exp.Duration))
 
 	writeWindow(&b, "BASELINE", out.Baseline, out.CPUBaseline)
+	if out.OfferedRate > 0 || out.CompletedRate > 0 {
+		fmt.Fprintf(&b, "%-16s %.1f rps\n", "offered rate", out.OfferedRate)
+		fmt.Fprintf(&b, "%-16s %.1f rps\n\n", "completed rate", out.CompletedRate)
+	}
 	writeWindow(&b, "DURING FAILURE", out.Failure, out.CPUFailure)
 	writeWindow(&b, "RECOVERY", out.Recovery, 0)
 

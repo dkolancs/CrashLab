@@ -329,3 +329,61 @@ func TestReportShowsDegradationAndRecovery(t *testing.T) {
 		}
 	}
 }
+
+func TestWarmupKeepsShortBaselineAndDropsLongOne(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	exp := model.Experiment{EntryService: "storefront", Target: "payment-service", StartedAt: start}
+	short := loadSeries(start, 10, 12)
+	if got := Evaluate(exp, short, nil, start.Add(20*time.Second), start.Add(30*time.Second)); got.Baseline.Count != 10 {
+		t.Fatalf("short baseline count = %d", got.Baseline.Count)
+	}
+	long := loadSeries(start, 14, 12)
+	got := Evaluate(exp, long, nil, start.Add(20*time.Second), start.Add(40*time.Second))
+	if got.Baseline.Count != 12 {
+		t.Fatalf("warmup baseline count = %d", got.Baseline.Count)
+	}
+	if got.OfferedRate < 9 || got.CompletedRate < 9 {
+		t.Fatalf("rates offered=%v completed=%v", got.OfferedRate, got.CompletedRate)
+	}
+	text := Format(exp, got, nil)
+	if !strings.Contains(text, "offered rate") || !strings.Contains(text, "completed rate") {
+		t.Fatalf("report missing rates\n%s", text)
+	}
+}
+
+func TestCompareSameExperiment(t *testing.T) {
+	leftMs := int64(200)
+	rightMs := int64(2200)
+	left := Outcome{Failure: Window{ErrorRate: 0.1}, RecoveryMs: &leftMs, Hops: []Hop{{Service: "checkout-service"}}, Assertions: []AssertionResult{{Name: "error_rate", Pass: true, Detail: "error rate 10%"}}}
+	right := Outcome{Failure: Window{ErrorRate: 1}, RecoveryMs: &rightMs, Hops: []Hop{{Service: "checkout-service"}, {Service: "storefront"}}, Assertions: []AssertionResult{{Name: "error_rate", Pass: false, Detail: "error rate 100%"}}}
+	delta := Compare("payment-latency", left, "payment-latency", right)
+	if !delta.SameName || delta.ErrorRateDelta != 0.9 || delta.RecoveryDeltaMs == nil || *delta.RecoveryDeltaMs != 2000 {
+		t.Fatalf("delta = %#v", delta)
+	}
+}
+
+func loadSeries(start time.Time, baselineN, failureN int) []model.Sample {
+	var samples []model.Sample
+	for i := 0; i < baselineN; i++ {
+		at := start.Add(time.Duration(i) * time.Second)
+		samples = append(samples,
+			model.Sample{At: at, Phase: model.PhaseBaseline, Source: model.SourceLoad, Service: "storefront", Name: model.MetricLatencyMS, Value: 40},
+			model.Sample{At: at, Phase: model.PhaseBaseline, Source: model.SourceLoad, Service: "storefront", Name: model.MetricError, Value: 0},
+		)
+	}
+	for i := 0; i < failureN; i++ {
+		at := start.Add(time.Duration(baselineN+i) * time.Second)
+		samples = append(samples,
+			model.Sample{At: at, Phase: model.PhaseObserve, Source: model.SourceLoad, Service: "storefront", Name: model.MetricLatencyMS, Value: 80},
+			model.Sample{At: at, Phase: model.PhaseObserve, Source: model.SourceLoad, Service: "storefront", Name: model.MetricError, Value: 0},
+		)
+	}
+	for i := 0; i < 3; i++ {
+		at := start.Add(time.Duration(i) * time.Second)
+		samples = append(samples,
+			model.Sample{At: at, Phase: model.PhaseBaseline, Source: model.SourceLoad, Service: "storefront", Name: model.MetricOffered, Value: float64((i + 1) * 10)},
+			model.Sample{At: at, Phase: model.PhaseBaseline, Source: model.SourceLoad, Service: "storefront", Name: model.MetricCompleted, Value: float64((i + 1) * 10)},
+		)
+	}
+	return samples
+}
