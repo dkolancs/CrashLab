@@ -90,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/topology", s.topology)
 	mux.HandleFunc("GET /api/experiments", s.list)
 	mux.HandleFunc("GET /api/compare", s.compare)
+	mux.HandleFunc("GET /api/history", s.history)
 	mux.HandleFunc("GET /api/suggestions", s.suggestions)
 	mux.HandleFunc("POST /api/experiments", s.create)
 	mux.HandleFunc("POST /api/experiments/{id}/stop", s.stop)
@@ -162,6 +163,35 @@ func decodeOutcome(raw json.RawMessage) analysis.Outcome {
 	var out analysis.Outcome
 	_ = json.Unmarshal(raw, &out)
 	return out
+}
+
+func (s *Server) history(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	list, err := s.Store.ListCompletedExperiments()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	var runs []analysis.SavedRun
+	for _, exp := range list {
+		if name != "" && exp.Name != name {
+			continue
+		}
+		_, summary, ok, err := s.Store.GetResult(exp.ID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if !ok {
+			continue
+		}
+		run, err := analysis.SavedFromSummary(exp.ID, exp.Name, exp.ExpectFailure, summary)
+		if err != nil {
+			continue
+		}
+		runs = append(runs, run)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"history": analysis.History(runs)})
 }
 
 func (s *Server) suggestions(w http.ResponseWriter, r *http.Request) {

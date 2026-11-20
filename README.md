@@ -46,4 +46,6 @@ CrashLab needs a local Docker daemon. The Docker socket can control the host, so
 
 `crashlab test` runs the files in a directory one at a time. Each run has a timeout of the baseline, fault, and recovery windows plus 45 seconds, and a timeout still clears the fault. The suite stops on the first cleanup failure. `--shared-baseline` reuses the first run's baseline samples. `--out dir` writes the text report and the JSON outcome. A later run of the same name prints a regression when an assertion fails, the failure error rate rises by at least 5 points, or recovery time rises by at least 2 seconds against the last passing run in that SQLite file. That line records a difference, not a cause.
 
+`crashlab history` groups completed runs by name. The pass rate counts only judged runs: at least 10 baseline and failure samples, and not "Not enough data". A file with `expect.mode: fail` is listed as known bad and is left out of that rate. Recovery times are printed oldest to newest. The dashboard shows the same list.
+
 Apps that already export OTLP HTTP can `POST /v1/traces`. CrashLab keeps server spans whose parent is in the same payload and whose time overlaps the fault window, and turns those into the same observed edges as `/traces`. Apps without traces keep `depends_on`.
