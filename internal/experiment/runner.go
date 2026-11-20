@@ -20,22 +20,26 @@ import (
 
 // Spec is a request to run one experiment.
 type Spec struct {
-	Name          string
-	Target        string
-	FaultType     string
-	Delay         time.Duration
-	LossPercent   float64
-	CPUPercent    float64
-	Baseline      time.Duration
-	Duration      time.Duration
-	Recovery      time.Duration
-	EntryURL      string
-	EntryService  string
-	ComposeFile   string
-	Project       string
-	NetemDir      string
-	Assertions    []analysis.Assertion
-	ExpectFailure bool
+	Name             string
+	Target           string
+	FaultType        string
+	Delay            time.Duration
+	LossPercent      float64
+	CPUPercent       float64
+	Baseline         time.Duration
+	Duration         time.Duration
+	Recovery         time.Duration
+	EntryURL         string
+	EntryService     string
+	ComposeFile      string
+	Project          string
+	NetemDir         string
+	Assertions       []analysis.Assertion
+	ExpectFailure    bool
+	AllowPrivileged  bool
+	Timeout          time.Duration
+	SkipBaseline     bool
+	SharedBaselineID int64
 }
 
 // ApplyDefaults fills the v0.1 demo settings.
@@ -195,17 +199,32 @@ func (r *Runner) Running() bool {
 }
 
 func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
+	timeout := spec.Timeout
+	if timeout <= 0 {
+		timeout = spec.Baseline + spec.Duration + spec.Recovery + 45*time.Second
+		if spec.SkipBaseline && timeout > spec.Baseline {
+			timeout -= spec.Baseline
+		}
+	}
+	ctx, cancelTimeout := context.WithTimeout(ctx, timeout)
+	defer cancelTimeout()
 	var runErr error
 	var cli *client.Client
 	var targetID string
-	defer func() {
-		if targetID != "" && cli != nil {
-			clearCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-			if err := fault.Clear(clearCtx, cli, targetID); err != nil {
-				log.Printf("experiment %d: clear fault: %v", exp.ID, err)
-			}
-			cancel()
+	clearFault := func() error {
+		if targetID == "" || cli == nil {
+			return nil
 		}
+		clearCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		return fault.ClearOptions(clearCtx, cli, targetID, fault.Options{AllowPrivileged: spec.AllowPrivileged})
+	}
+	defer func() {
+		if err := clearFault(); err != nil {
+			log.Printf("experiment %d: clear fault: %v", exp.ID, err)
+			runErr = fmt.Errorf("cleanup failed: %w", err)
+		}
+		targetID = ""
 		if cli != nil {
 			cli.Close()
 		}
@@ -253,7 +272,7 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 		runErr = err
 		return
 	}
-	if err := fault.Clear(ctx, cli, targetID); err != nil {
+	if err := fault.ClearOptions(ctx, cli, targetID, fault.Options{AllowPrivileged: spec.AllowPrivileged}); err != nil {
 		log.Printf("experiment %d: pre-clear: %v", exp.ID, err)
 	}
 	if err := metrics.WaitReady(ctx, spec.EntryURL, 60*time.Second); err != nil {
@@ -294,7 +313,13 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 		return
 	}
 	log.Printf("experiment %d phase=baseline duration=%s", exp.ID, spec.Baseline)
-	if err := sleep(ctx, spec.Baseline); err != nil {
+	if spec.SkipBaseline {
+		if err := r.copyBaseline(exp.ID, spec.SharedBaselineID); err != nil {
+			stopCollectors()
+			runErr = err
+			return
+		}
+	} else if err := sleep(ctx, spec.Baseline); err != nil {
 		stopCollectors()
 		runErr = err
 		return
@@ -309,9 +334,10 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 	log.Printf("experiment %d phase=inject", exp.ID)
 	injectedAt := time.Now().UTC()
 	if err := fault.Apply(ctx, cli, targetID, fault.Request{
-		Kind:    spec.FaultType,
-		Delay:   spec.Delay,
-		Percent: faultPercent(spec),
+		Kind:            spec.FaultType,
+		Delay:           spec.Delay,
+		Percent:         faultPercent(spec),
+		AllowPrivileged: spec.AllowPrivileged,
 	}); err != nil {
 		stopCollectors()
 		runErr = err
@@ -356,9 +382,9 @@ func (r *Runner) execute(ctx context.Context, exp model.Experiment, spec Spec) {
 	log.Printf("experiment %d phase=remove", exp.ID)
 	removedAt := time.Now().UTC()
 	clearedID := targetID
-	if err := fault.Clear(ctx, cli, targetID); err != nil {
+	if err := clearFault(); err != nil {
 		stopCollectors()
-		runErr = err
+		runErr = fmt.Errorf("cleanup failed: %w", err)
 		return
 	}
 	targetID = ""
@@ -464,6 +490,9 @@ func (r *Runner) analyze(id int64, spec Spec, injectedAt, removedAt time.Time) e
 	}
 	outcome := analysis.Evaluate(exp, samples, services, injectedAt, removedAt)
 	outcome.Assertions = analysis.Judge(outcome, spec.Assertions)
+	if prev, prevOut, ok := r.previousPassing(exp.Name, exp.ID); ok {
+		outcome.Regression = analysis.RegressionNote(prev.ID, prevOut, outcome)
+	}
 	outcome.Explanation = analysis.Explain(exp, outcome)
 	for _, ev := range outcome.Derived {
 		if err := r.Store.AddEvent(ev); err != nil {
@@ -484,6 +513,48 @@ func (r *Runner) analyze(id int64, spec Spec, injectedAt, removedAt time.Time) e
 		return err
 	}
 	return r.Store.SaveResult(id, text, string(raw))
+}
+
+func (r *Runner) previousPassing(name string, beforeID int64) (model.Experiment, analysis.Outcome, bool) {
+	list, err := r.Store.ListNamedExperiments(name, beforeID)
+	if err != nil {
+		log.Printf("regression lookup: %v", err)
+		return model.Experiment{}, analysis.Outcome{}, false
+	}
+	for _, item := range list {
+		_, summary, ok, err := r.Store.GetResult(item.ID)
+		if err != nil || !ok || analysis.SummaryFailed(summary) {
+			continue
+		}
+		var out analysis.Outcome
+		if json.Unmarshal([]byte(summary), &out) != nil {
+			continue
+		}
+		if out.Conclusion == "Not enough data" || out.Baseline.Count < analysis.MinSamples || out.Failure.Count < analysis.MinSamples {
+			continue
+		}
+		return item, out, true
+	}
+	return model.Experiment{}, analysis.Outcome{}, false
+}
+
+func (r *Runner) copyBaseline(dst, src int64) error {
+	samples, err := r.Store.ListSamples(src)
+	if err != nil {
+		return err
+	}
+	var batch []model.Sample
+	for _, sm := range samples {
+		if sm.Phase != model.PhaseBaseline {
+			continue
+		}
+		sm.ExperimentID = dst
+		batch = append(batch, sm)
+	}
+	if len(batch) == 0 {
+		return fmt.Errorf("shared baseline %d has no baseline samples", src)
+	}
+	return r.Store.InsertSamples(batch)
 }
 
 func (r *Runner) writeSamples(id int64, samples <-chan model.Sample) {
@@ -569,7 +640,7 @@ func ReconcileOpen(ctx context.Context, db *store.Store) {
 			continue
 		}
 		log.Printf("clearing leftover fault on %s from experiment %d", f.Service, f.ExperimentID)
-		if err := fault.Clear(ctx, cli, f.ContainerID); err != nil {
+		if err := fault.ClearOptions(ctx, cli, f.ContainerID, fault.Options{}); err != nil {
 			log.Printf("reconcile %s: %v", f.Service, err)
 		}
 		removed := time.Now().UTC()

@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestPrivilegedRetryRequiresFlag(t *testing.T) {
+	if allowPrivilegedRetry(false, "operation not permitted") {
+		t.Fatal("privileged retry ran without the flag")
+	}
+	if !allowPrivilegedRetry(true, "net_admin") {
+		t.Fatal("privileged retry did not run when requested")
+	}
+	if allowPrivilegedRetry(true, "no such container") {
+		t.Fatal("unrelated error retried privileged")
+	}
+}
+
 func TestClearContinuesAfterNetemFailure(t *testing.T) {
 	var calls []string
 	err := performClear(clearActions{

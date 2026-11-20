@@ -38,7 +38,7 @@ expect:
 	if spec.Name != "payment-latency" || spec.Target != "payment-service" || spec.FaultType != model.FaultLatency {
 		t.Fatalf("spec = %#v", spec)
 	}
-	if spec.Delay != 800*time.Millisecond || spec.Duration != 30*time.Second || len(spec.Assertions) != 3 {
+	if spec.Delay != 800*time.Millisecond || spec.Duration != 30*time.Second || len(spec.Assertions) != 3 || spec.AllowPrivileged {
 		t.Fatalf("spec timings = %#v", spec)
 	}
 	if spec.ExpectFailure {

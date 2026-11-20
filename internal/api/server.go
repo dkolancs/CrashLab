@@ -16,8 +16,12 @@ import (
 	"github.com/dkolancs/crashlab/internal/dockerx"
 	"github.com/dkolancs/crashlab/internal/experiment"
 	"github.com/dkolancs/crashlab/internal/model"
+	"github.com/dkolancs/crashlab/internal/otel"
 	"github.com/dkolancs/crashlab/internal/store"
 )
+
+// DefaultListenAddr is the API bind address. It stays on loopback unless --addr says otherwise.
+const DefaultListenAddr = "127.0.0.1:8080"
 
 // Server is the local control API used by the dashboard.
 type Server struct {
@@ -89,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/suggestions", s.suggestions)
 	mux.HandleFunc("POST /api/experiments", s.create)
 	mux.HandleFunc("POST /api/experiments/{id}/stop", s.stop)
+	mux.HandleFunc("POST /v1/traces", s.otlpTraces)
 	mux.HandleFunc("GET /api/experiments/{id}/stream", s.stream)
 	mux.HandleFunc("GET /api/experiments/{id}/report", s.report)
 	mux.HandleFunc("GET /api/experiments/{id}", s.get)
@@ -170,6 +175,57 @@ func (s *Server) suggestions(w http.ResponseWriter, r *http.Request) {
 		entry = "storefront"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"suggestions": discover.Suggest(topo.Services, entry)})
+}
+
+func (s *Server) otlpTraces(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	exp, ok, err := s.Store.LatestExperiment()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !ok || exp.Status != model.StatusRunning {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	row, has, err := s.Store.GetFault(exp.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	var windowStart, windowEnd time.Time
+	if has && row.InjectedAt != nil {
+		windowStart = *row.InjectedAt
+	}
+	if has && row.RemovedAt != nil {
+		windowEnd = *row.RemovedAt
+	}
+	edges, err := otel.Edges(body, windowStart, windowEnd)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	samples := make([]model.Sample, 0, len(edges))
+	for _, edge := range edges {
+		samples = append(samples, model.Sample{
+			ExperimentID: exp.ID,
+			At:           edge.At,
+			Phase:        exp.Phase,
+			Source:       model.SourceTrace,
+			Service:      edge.From + ">" + edge.To,
+			Name:         model.MetricTrace,
+			Value:        edge.LatencyMs,
+		})
+	}
+	if err := s.Store.InsertSamples(samples); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
