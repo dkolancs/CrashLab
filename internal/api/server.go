@@ -139,7 +139,24 @@ func (s *Server) compare(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"left": leftSnap, "right": rightSnap})
+	leftName, rightName := "", ""
+	if leftSnap.Experiment != nil {
+		leftName = leftSnap.Experiment.Name
+	}
+	if rightSnap.Experiment != nil {
+		rightName = rightSnap.Experiment.Name
+	}
+	delta := analysis.Compare(leftName, decodeOutcome(leftSnap.Result), rightName, decodeOutcome(rightSnap.Result))
+	writeJSON(w, http.StatusOK, map[string]any{"left": leftSnap, "right": rightSnap, "delta": delta})
+}
+
+func decodeOutcome(raw json.RawMessage) analysis.Outcome {
+	if len(raw) == 0 || string(raw) == "null" {
+		return analysis.Outcome{}
+	}
+	var out analysis.Outcome
+	_ = json.Unmarshal(raw, &out)
+	return out
 }
 
 func (s *Server) suggestions(w http.ResponseWriter, r *http.Request) {
@@ -148,7 +165,11 @@ func (s *Server) suggestions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"suggestions": discover.Suggest(topo.Services)})
+	entry := r.URL.Query().Get("entry")
+	if entry == "" {
+		entry = "storefront"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"suggestions": discover.Suggest(topo.Services, entry)})
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

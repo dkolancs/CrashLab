@@ -40,23 +40,36 @@ type Bucket struct {
 
 // Outcome is the measured result of an experiment.
 type Outcome struct {
-	Baseline    Window            `json:"baseline"`
-	Failure     Window            `json:"failure"`
-	Recovery    Window            `json:"recovery"`
-	RecoveryMs  *int64            `json:"recoveryMs"`
-	RecoveredAt time.Time         `json:"recoveredAt,omitempty"`
-	Degraded    bool              `json:"degraded"`
-	Conclusion  string            `json:"conclusion"`
-	Hops        []Hop             `json:"propagation"`
-	Buckets     []Bucket          `json:"buckets"`
-	NodeStates  map[string]string `json:"nodeStates"`
-	RetryFactor float64           `json:"retryFactor"`
-	CPUBaseline float64           `json:"cpuBaseline"`
-	CPUFailure  float64           `json:"cpuFailure"`
-	PathNote    string            `json:"pathNote"`
-	Explanation string            `json:"explanation"`
-	Assertions  []AssertionResult `json:"assertions"`
-	Derived     []model.Event     `json:"-"`
+	Baseline      Window            `json:"baseline"`
+	Failure       Window            `json:"failure"`
+	Recovery      Window            `json:"recovery"`
+	RecoveryMs    *int64            `json:"recoveryMs"`
+	RecoveredAt   time.Time         `json:"recoveredAt,omitempty"`
+	Degraded      bool              `json:"degraded"`
+	Conclusion    string            `json:"conclusion"`
+	Hops          []Hop             `json:"propagation"`
+	Buckets       []Bucket          `json:"buckets"`
+	NodeStates    map[string]string `json:"nodeStates"`
+	RetryFactor   float64           `json:"retryFactor"`
+	CPUBaseline   float64           `json:"cpuBaseline"`
+	CPUFailure    float64           `json:"cpuFailure"`
+	PathNote      string            `json:"pathNote"`
+	Explanation   string            `json:"explanation"`
+	Assertions    []AssertionResult `json:"assertions"`
+	OfferedRate   float64           `json:"offeredRate"`
+	CompletedRate float64           `json:"completedRate"`
+	Derived       []model.Event     `json:"-"`
+}
+
+// Comparison is the measured difference between two saved runs.
+type Comparison struct {
+	SameName        bool    `json:"sameName"`
+	LeftName        string  `json:"leftName"`
+	RightName       string  `json:"rightName"`
+	ErrorRateDelta  float64 `json:"errorRateDelta"`
+	RecoveryDeltaMs *int64  `json:"recoveryDeltaMs"`
+	LeftRecoveryMs  *int64  `json:"leftRecoveryMs"`
+	RightRecoveryMs *int64  `json:"rightRecoveryMs"`
 }
 
 type request struct {
@@ -70,7 +83,7 @@ type request struct {
 // Propagation is timestamp correlation along declared dependencies, not proof of causation.
 func Evaluate(exp model.Experiment, samples []model.Sample, services []model.Service, injectedAt, removedAt time.Time) Outcome {
 	services = mergeTraceDependencies(services, samples)
-	reqs := pairRequests(samples, exp.EntryService, model.SourceLoad)
+	reqs := dropBaselineWarmup(pairRequests(samples, exp.EntryService, model.SourceLoad), 2*time.Second)
 	out := Outcome{
 		PathNote:   pathNote(samples),
 		Baseline:   windowFor(reqs, model.PhaseBaseline),
@@ -113,8 +126,77 @@ func Evaluate(exp model.Experiment, samples []model.Sample, services []model.Ser
 	default:
 		out.Conclusion = "System tolerated the fault."
 	}
+	out.OfferedRate = gaugeRate(samples, model.MetricOffered, model.PhaseBaseline)
+	out.CompletedRate = gaugeRate(samples, model.MetricCompleted, model.PhaseBaseline)
 	out.Derived = derivedEvents(exp, out, samples, injectedAt)
 	return out
+}
+
+// Compare reports how the later run differs from the earlier one.
+func Compare(leftName string, left Outcome, rightName string, right Outcome) Comparison {
+	delta := Comparison{
+		SameName:        leftName != "" && leftName == rightName,
+		LeftName:        leftName,
+		RightName:       rightName,
+		ErrorRateDelta:  right.Failure.ErrorRate - left.Failure.ErrorRate,
+		LeftRecoveryMs:  left.RecoveryMs,
+		RightRecoveryMs: right.RecoveryMs,
+	}
+	if left.RecoveryMs != nil && right.RecoveryMs != nil {
+		ms := *right.RecoveryMs - *left.RecoveryMs
+		delta.RecoveryDeltaMs = &ms
+	}
+	return delta
+}
+
+func dropBaselineWarmup(reqs []request, warmup time.Duration) []request {
+	var first time.Time
+	has := false
+	for _, req := range reqs {
+		if req.phase != model.PhaseBaseline {
+			continue
+		}
+		if !has || req.at.Before(first) {
+			first = req.at
+			has = true
+		}
+	}
+	if !has {
+		return reqs
+	}
+	cutoff := first.Add(warmup)
+	filtered := make([]request, 0, len(reqs))
+	for _, req := range reqs {
+		if req.phase == model.PhaseBaseline && req.at.Before(cutoff) {
+			continue
+		}
+		filtered = append(filtered, req)
+	}
+	if len(filterPhase(filtered, model.PhaseBaseline)) < MinSamples {
+		return reqs
+	}
+	return filtered
+}
+
+func filterPhase(reqs []request, phase string) []request {
+	var out []request
+	for _, req := range reqs {
+		if req.phase == phase {
+			out = append(out, req)
+		}
+	}
+	return out
+}
+
+func gaugeRate(samples []model.Sample, name, phase string) float64 {
+	var pts []counterPoint
+	for _, sm := range samples {
+		if sm.Name == name && sm.Phase == phase {
+			pts = append(pts, counterPoint{at: sm.At, v: sm.Value})
+		}
+	}
+	sort.Slice(pts, func(i, j int) bool { return pts[i].at.Before(pts[j].at) })
+	return pointRate(pts)
 }
 
 // Propagation orders the fault target and dependent services by the first

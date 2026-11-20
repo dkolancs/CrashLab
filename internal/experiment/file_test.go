@@ -41,4 +41,23 @@ expect:
 	if spec.Delay != 800*time.Millisecond || spec.Duration != 30*time.Second || len(spec.Assertions) != 3 {
 		t.Fatalf("spec timings = %#v", spec)
 	}
+	if spec.ExpectFailure {
+		t.Fatal("mode was not set")
+	}
+}
+
+func TestParseExpectFail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.yaml")
+	body := []byte("name: bad\nexpect:\n  mode: fail\n  error_rate: \"< 5%\"\n")
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !spec.ExpectFailure || len(spec.Assertions) != 1 {
+		t.Fatalf("spec = %#v", spec)
+	}
 }

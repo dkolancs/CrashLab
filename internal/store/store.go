@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS experiment_results (
 		`ALTER TABLE faults ADD COLUMN cpu_percent REAL NOT NULL DEFAULT 0`,
 		`ALTER TABLE faults ADD COLUMN container_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE faults ADD COLUMN deadline_at INTEGER`,
+		`ALTER TABLE experiments ADD COLUMN expect_failure INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return fmt.Errorf("migrate: %w", err)
@@ -129,12 +130,12 @@ func (s *Store) CreateExperiment(e model.Experiment) (model.Experiment, error) {
 INSERT INTO experiments (
   name, status, phase, target, delay_ms, baseline_ms, duration_ms, recovery_ms,
   entry_url, entry_service, compose_file, project, started_at, finished_at, error,
-  fault_type, loss_percent, cpu_percent
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  fault_type, loss_percent, cpu_percent, expect_failure
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.Name, e.Status, e.Phase, e.Target, e.Delay.Milliseconds(), e.Baseline.Milliseconds(),
 		e.Duration.Milliseconds(), e.Recovery.Milliseconds(), e.EntryURL, e.EntryService,
 		e.ComposeFile, e.Project, e.StartedAt.UnixMilli(), nullTime(e.FinishedAt), e.Error,
-		faultTypeOrLatency(e.FaultType), e.LossPercent, e.CPUPercent,
+		faultTypeOrLatency(e.FaultType), e.LossPercent, e.CPUPercent, boolInt(e.ExpectFailure),
 	)
 	if err != nil {
 		return e, fmt.Errorf("insert experiment: %w", err)
@@ -166,7 +167,7 @@ func (s *Store) GetExperiment(id int64) (model.Experiment, error) {
 	row := s.db.QueryRow(`
 SELECT id, name, status, phase, target, delay_ms, baseline_ms, duration_ms, recovery_ms,
        entry_url, entry_service, compose_file, project, started_at, finished_at, error,
-       fault_type, loss_percent, cpu_percent
+       fault_type, loss_percent, cpu_percent, expect_failure
 FROM experiments WHERE id = ?`, id)
 	e, err := scanExperiment(row)
 	if err != nil {
@@ -183,7 +184,7 @@ func (s *Store) ListExperiments(limit int) ([]model.Experiment, error) {
 	rows, err := s.db.Query(`
 SELECT id, name, status, phase, target, delay_ms, baseline_ms, duration_ms, recovery_ms,
        entry_url, entry_service, compose_file, project, started_at, finished_at, error,
-       fault_type, loss_percent, cpu_percent
+       fault_type, loss_percent, cpu_percent, expect_failure
 FROM experiments ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -437,11 +438,12 @@ type scanner interface {
 func scanExperiment(row scanner) (model.Experiment, error) {
 	var e model.Experiment
 	var delay, baseline, duration, recovery, started int64
+	var expectFailure int
 	var finished sql.NullInt64
 	err := row.Scan(
 		&e.ID, &e.Name, &e.Status, &e.Phase, &e.Target, &delay, &baseline, &duration, &recovery,
 		&e.EntryURL, &e.EntryService, &e.ComposeFile, &e.Project, &started, &finished, &e.Error,
-		&e.FaultType, &e.LossPercent, &e.CPUPercent,
+		&e.FaultType, &e.LossPercent, &e.CPUPercent, &expectFailure,
 	)
 	if err != nil {
 		return e, err
@@ -452,7 +454,15 @@ func scanExperiment(row scanner) (model.Experiment, error) {
 	e.Recovery = time.Duration(recovery) * time.Millisecond
 	e.StartedAt = time.UnixMilli(started).UTC()
 	e.FinishedAt = timePtr(finished)
+	e.ExpectFailure = expectFailure != 0
 	return e, nil
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func faultTypeOrLatency(v string) string {

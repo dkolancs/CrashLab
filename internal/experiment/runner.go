@@ -20,21 +20,22 @@ import (
 
 // Spec is a request to run one experiment.
 type Spec struct {
-	Name         string
-	Target       string
-	FaultType    string
-	Delay        time.Duration
-	LossPercent  float64
-	CPUPercent   float64
-	Baseline     time.Duration
-	Duration     time.Duration
-	Recovery     time.Duration
-	EntryURL     string
-	EntryService string
-	ComposeFile  string
-	Project      string
-	NetemDir     string
-	Assertions   []analysis.Assertion
+	Name          string
+	Target        string
+	FaultType     string
+	Delay         time.Duration
+	LossPercent   float64
+	CPUPercent    float64
+	Baseline      time.Duration
+	Duration      time.Duration
+	Recovery      time.Duration
+	EntryURL      string
+	EntryService  string
+	ComposeFile   string
+	Project       string
+	NetemDir      string
+	Assertions    []analysis.Assertion
+	ExpectFailure bool
 }
 
 // ApplyDefaults fills the v0.1 demo settings.
@@ -99,22 +100,23 @@ func (r *Runner) Start(parent context.Context, spec Spec) (model.Experiment, err
 		return model.Experiment{}, fmt.Errorf("an experiment is already running")
 	}
 	exp, err := r.Store.CreateExperiment(model.Experiment{
-		Name:         spec.Name,
-		Status:       model.StatusRunning,
-		Phase:        model.PhaseSetup,
-		Target:       spec.Target,
-		FaultType:    spec.FaultType,
-		Delay:        spec.Delay,
-		LossPercent:  spec.LossPercent,
-		CPUPercent:   spec.CPUPercent,
-		Baseline:     spec.Baseline,
-		Duration:     spec.Duration,
-		Recovery:     spec.Recovery,
-		EntryURL:     spec.EntryURL,
-		EntryService: spec.EntryService,
-		ComposeFile:  spec.ComposeFile,
-		Project:      spec.Project,
-		StartedAt:    time.Now().UTC(),
+		Name:          spec.Name,
+		Status:        model.StatusRunning,
+		Phase:         model.PhaseSetup,
+		Target:        spec.Target,
+		FaultType:     spec.FaultType,
+		Delay:         spec.Delay,
+		LossPercent:   spec.LossPercent,
+		CPUPercent:    spec.CPUPercent,
+		Baseline:      spec.Baseline,
+		Duration:      spec.Duration,
+		Recovery:      spec.Recovery,
+		EntryURL:      spec.EntryURL,
+		EntryService:  spec.EntryService,
+		ComposeFile:   spec.ComposeFile,
+		Project:       spec.Project,
+		ExpectFailure: spec.ExpectFailure,
+		StartedAt:     time.Now().UTC(),
 	})
 	if err != nil {
 		return exp, err
@@ -156,7 +158,17 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (model.Experiment, error) {
 				if current.Status == model.StatusFailed {
 					return current, fmt.Errorf("%s", current.Error)
 				}
-				if _, summary, ok, err := r.Store.GetResult(current.ID); err == nil && ok && analysis.SummaryFailed(summary) {
+				failed := false
+				if _, summary, ok, err := r.Store.GetResult(current.ID); err == nil && ok {
+					failed = analysis.SummaryFailed(summary)
+				}
+				if current.ExpectFailure {
+					if failed {
+						return current, nil
+					}
+					return current, fmt.Errorf("experiment passed assertions; expected failure")
+				}
+				if failed {
 					return current, fmt.Errorf("experiment failed assertions")
 				}
 				return current, nil

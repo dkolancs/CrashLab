@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -72,6 +73,7 @@ var client = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 // Span is one observed downstream call.
 type Span struct {
 	ID        string    `json:"id"`
+	TraceID   string    `json:"traceId"`
 	From      string    `json:"from"`
 	To        string    `json:"to"`
 	LatencyMs float64   `json:"latencyMs"`
@@ -104,17 +106,34 @@ func snapshotTraces() []Span {
 	return out
 }
 
-// Call performs a downstream GET and records the edge for CrashLab.
-func Call(ctx context.Context, from, to, url string) (int, []byte, error) {
+// EnsureTrace stamps a traceparent onto an inbound request that does not already have one.
+func EnsureTrace(r *http.Request) {
+	if r == nil {
+		return
+	}
+	if _, ok := traceParent(r); ok {
+		return
+	}
+	r.Header.Set("traceparent", "00-"+randomHex(16)+"-"+randomHex(8)+"-01")
+}
+
+// Call performs a downstream GET and continues the inbound traceparent.
+func Call(ctx context.Context, parent *http.Request, from, to, url string) (int, []byte, error) {
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, nil, err
 	}
-	req.Header.Set("traceparent", "00-"+randomHex(16)+"-"+randomHex(8)+"-01")
+	traceID, _ := traceParent(parent)
+	if traceID == "" {
+		traceID = randomHex(16)
+	}
+	spanID := randomHex(8)
+	req.Header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
 	status, body, err := Get(req)
 	recordTrace(Span{
-		ID:        randomHex(8),
+		ID:        spanID,
+		TraceID:   traceID,
 		From:      from,
 		To:        to,
 		LatencyMs: float64(time.Since(start).Microseconds()) / 1000,
@@ -122,6 +141,17 @@ func Call(ctx context.Context, from, to, url string) (int, []byte, error) {
 		At:        time.Now().UTC(),
 	})
 	return status, body, err
+}
+
+func traceParent(r *http.Request) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	parts := strings.Split(r.Header.Get("traceparent"), "-")
+	if len(parts) < 4 || len(parts[1]) != 32 {
+		return "", false
+	}
+	return parts[1], true
 }
 
 func randomHex(n int) string {

@@ -2,6 +2,7 @@ package discover
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/dkolancs/crashlab/internal/model"
 )
@@ -14,11 +15,24 @@ type Suggestion struct {
 }
 
 // Suggest recommends latency, outage, and packet loss for services with at least two transitive dependents.
-func Suggest(services []model.Service) []Suggestion {
+// Datastores are omitted unless the entry service health-checks them directly.
+func Suggest(services []model.Service, entry string) []Suggestion {
+	hard := map[string]bool{}
+	for _, svc := range services {
+		if svc.Name != entry {
+			continue
+		}
+		for _, dep := range svc.DependsHealthy {
+			hard[dep] = true
+		}
+	}
 	var out []Suggestion
 	for _, svc := range services {
 		count := transitiveDependents(services, svc.Name)
 		if count < 2 {
+			continue
+		}
+		if isDatastore(svc) && !hard[svc.Name] {
 			continue
 		}
 		out = append(out, Suggestion{
@@ -50,6 +64,16 @@ func transitiveDependents(services []model.Service, name string) int {
 		queue = append(queue, rev[cur]...)
 	}
 	return len(seen)
+}
+
+func isDatastore(svc model.Service) bool {
+	blob := strings.ToLower(svc.Name + " " + svc.Image)
+	for _, kind := range []string{"postgres", "mysql", "mariadb", "redis", "mongo"} {
+		if strings.Contains(blob, kind) {
+			return true
+		}
+	}
+	return false
 }
 
 func itoa(n int) string {

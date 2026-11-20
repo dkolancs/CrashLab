@@ -13,6 +13,7 @@ entry:
   service: storefront
 compose: demo/compose.yaml
 expect:
+  mode: fail
   error_rate: "< 5%"
   p95_latency: "< 1000ms"
   recovery_time: "< 10s"

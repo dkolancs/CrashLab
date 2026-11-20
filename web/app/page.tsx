@@ -33,6 +33,8 @@ type Experiment = {
 type EventRow = { id: number; at: string; kind: string; service: string; message: string };
 type Bucket = { t: string; p95: number; errorRate: number; successCount?: number };
 type Window = { p50: number; p95: number; errorRate: number; count: number; successCount?: number };
+type Hop = { service: string; at: string; reason: string };
+type Assertion = { name: string; pass: boolean; detail: string };
 type Result = {
   baseline: Window;
   failure: Window;
@@ -40,9 +42,19 @@ type Result = {
   recoveryMs: number | null;
   degraded: boolean;
   conclusion: string;
-  propagation: Array<{ service: string; at: string; reason: string }>;
+  propagation: Hop[];
+  assertions?: Assertion[];
   retryFactor: number;
   text: string;
+};
+type CompareDelta = {
+  sameName: boolean;
+  leftName: string;
+  rightName: string;
+  errorRateDelta: number;
+  recoveryDeltaMs: number | null;
+  leftRecoveryMs: number | null;
+  rightRecoveryMs: number | null;
 };
 
 type Snapshot = {
@@ -75,7 +87,7 @@ export default function Page() {
   const [suggestions, setSuggestions] = useState<Array<{ service: string; reasons: string[]; faults: string[] }>>([]);
   const [compareLeft, setCompareLeft] = useState("");
   const [compareRight, setCompareRight] = useState("");
-  const [comparison, setComparison] = useState<{ left: Snapshot; right: Snapshot } | null>(null);
+  const [comparison, setComparison] = useState<{ left: Snapshot; right: Snapshot; delta?: CompareDelta } | null>(null);
   const [baselineS, setBaselineS] = useState(15);
   const [durationS, setDurationS] = useState(30);
   const [recoveryS, setRecoveryS] = useState(15);
@@ -284,10 +296,7 @@ export default function Page() {
               Compare
             </button>
             {comparison?.left?.result && comparison?.right?.result ? (
-              <div className="numbers">
-                <WindowCard title={`#${comparison.left.experiment?.id} failure`} window={comparison.left.result.failure} />
-                <WindowCard title={`#${comparison.right.experiment?.id} failure`} window={comparison.right.result.failure} />
-              </div>
+              <CompareRuns left={comparison.left} right={comparison.right} delta={comparison.delta} />
             ) : null}
           </div>
           <div className="panel">
@@ -456,6 +465,48 @@ function Timeline({ events, startedAt }: { events: EventRow[]; startedAt?: strin
       })}
     </ol>
   );
+}
+
+function CompareRuns({ left, right, delta }: { left: Snapshot; right: Snapshot; delta?: CompareDelta }) {
+  const leftResult = left.result;
+  const rightResult = right.result;
+  if (!leftResult || !rightResult) return null;
+  const same = delta?.sameName ?? left.experiment?.name === right.experiment?.name;
+  return (
+    <div>
+      <p>{same ? "Same experiment name." : "These runs use different experiment names."}</p>
+      {delta ? (
+        <p>
+          Error rate delta {(delta.errorRateDelta * 100).toFixed(1)} points. Recovery delta{" "}
+          {delta.recoveryDeltaMs === null ? "n/a" : `${(delta.recoveryDeltaMs / 1000).toFixed(1)}s`}.
+        </p>
+      ) : null}
+      <h3>#{left.experiment?.id} {left.experiment?.name}</h3>
+      <RunSummary result={leftResult} />
+      <h3>#{right.experiment?.id} {right.experiment?.name}</h3>
+      <RunSummary result={rightResult} />
+    </div>
+  );
+}
+
+function RunSummary({ result }: { result: Result }) {
+  return (
+    <>
+      <div className="numbers">
+        <WindowCard title="Baseline" window={result.baseline} />
+        <WindowCard title="During failure" window={result.failure} />
+        <WindowCard title="Recovery" window={result.recovery} />
+      </div>
+      <p>Recovery time: {result.recoveryMs === null ? "n/a" : `${(result.recoveryMs / 1000).toFixed(1)}s`}</p>
+      <p>Assertions: {assertionLine(result.assertions)}</p>
+      <p>Propagation: {(result.propagation ?? []).map((hop) => hop.service).join(" → ") || "none"}</p>
+    </>
+  );
+}
+
+function assertionLine(assertions?: Assertion[]) {
+  if (!assertions?.length) return "none";
+  return assertions.map((item) => `${item.pass ? "PASS" : "FAIL"} ${item.detail}`).join("; ");
 }
 
 function Report({ result }: { result: Result | null }) {

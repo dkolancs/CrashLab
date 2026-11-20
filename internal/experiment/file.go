@@ -77,6 +77,11 @@ func ParseFile(path string) (Spec, error) {
 	if spec.Recovery, err = parseOptional(file.Experiment.Recovery); err != nil {
 		return Spec{}, fmt.Errorf("recovery: %w", err)
 	}
+	if file.Expect["mode"] == "fail" {
+		spec.ExpectFailure = true
+	} else if mode := file.Expect["mode"]; mode != "" && mode != "pass" {
+		return Spec{}, fmt.Errorf("expect.mode must be pass or fail")
+	}
 	for _, name := range []string{"error_rate", "p95_latency", "recovery_time"} {
 		expr, ok := file.Expect[name]
 		if !ok {
