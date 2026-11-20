@@ -1,0 +1,76 @@
+name: crashlab-demo
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: crashlab
+      POSTGRES_PASSWORD: crashlab
+      POSTGRES_DB: crashlab
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crashlab -d crashlab"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    networks: [lab]
+
+  payment-service:
+    build:
+      context: .
+      args:
+        CMD: payment
+    environment:
+      PORT: "8080"
+    ports:
+      - "8083:8080"
+    networks: [lab]
+
+  checkout-service:
+    build:
+      context: .
+      args:
+        CMD: checkout
+    environment:
+      PORT: "8080"
+      PAYMENT_URL: http://payment-service:8080
+    depends_on:
+      - payment-service
+    ports:
+      - "8082:8080"
+    networks: [lab]
+
+  inventory-service:
+    build:
+      context: .
+      args:
+        CMD: inventory
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://crashlab:crashlab@postgres:5432/crashlab?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8084:8080"
+    networks: [lab]
+
+  storefront:
+    build:
+      context: .
+      args:
+        CMD: storefront
+    environment:
+      PORT: "8080"
+      CHECKOUT_URL: http://checkout-service:8080
+      INVENTORY_URL: http://inventory-service:8080
+    depends_on:
+      - checkout-service
+      - inventory-service
+    ports:
+      - "8081:8080"
+    networks: [lab]
+
+networks:
+  lab:
