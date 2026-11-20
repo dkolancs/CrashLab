@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dkolancs/crashlab/internal/analysis"
 	"github.com/dkolancs/crashlab/internal/api"
 	"github.com/dkolancs/crashlab/internal/discover"
 	"github.com/dkolancs/crashlab/internal/dockerx"
@@ -46,6 +47,8 @@ func main() {
 		os.Exit(testCmd(os.Args[2:]))
 	case "report":
 		os.Exit(reportCmd(os.Args[2:]))
+	case "history":
+		os.Exit(historyCmd(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -69,6 +72,7 @@ Usage:
   crashlab clear payment-service
   crashlab test experiments/
   crashlab report <id>
+  crashlab history [--name payment-latency]
 
 `)
 }
@@ -459,6 +463,54 @@ func withTarget(compose, project, service string, fn func(context.Context, strin
 	}
 	fmt.Printf("%s %s\n", service, target.ContainerID[:12])
 	return 0
+}
+
+func historyCmd(args []string) int {
+	fs := flag.NewFlagSet("history", flag.ContinueOnError)
+	dbPath := fs.String("db", "crashlab.db", "sqlite database")
+	name := fs.String("name", "", "only this experiment name")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	db, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+	defer db.Close()
+	runs, err := loadHistory(db, *name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+	fmt.Print(analysis.FormatHistory(analysis.History(runs)))
+	return 0
+}
+
+func loadHistory(db *store.Store, name string) ([]analysis.SavedRun, error) {
+	list, err := db.ListCompletedExperiments()
+	if err != nil {
+		return nil, err
+	}
+	var runs []analysis.SavedRun
+	for _, exp := range list {
+		if name != "" && exp.Name != name {
+			continue
+		}
+		_, summary, ok, err := db.GetResult(exp.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		run, err := analysis.SavedFromSummary(exp.ID, exp.Name, exp.ExpectFailure, summary)
+		if err != nil {
+			continue
+		}
+		runs = append(runs, run)
+	}
+	return runs, nil
 }
 
 func reportCmd(args []string) int {

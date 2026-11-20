@@ -86,3 +86,56 @@ func TestCompareReportsErrorAndRecoveryDelta(t *testing.T) {
 		t.Fatalf("delta = %#v ids %d %d", body.Delta, left, right)
 	}
 }
+
+func TestHistoryEndpointSeparatesKnownBad(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "crashlab.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	save := func(name string, expect bool, summary string) {
+		t.Helper()
+		exp, err := db.CreateExperiment(model.Experiment{
+			Name: name, Status: model.StatusCompleted, Phase: model.PhaseDone,
+			ExpectFailure: expect, StartedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.SaveResult(exp.ID, "report", summary); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("ci-smoke", false, `{"baseline":{"count":10,"successCount":10},"failure":{"count":10,"successCount":10,"errorRate":0},"recoveryMs":200,"conclusion":"System tolerated the fault.","assertions":[{"name":"error_rate","pass":true,"detail":"error rate 0%"}]}`)
+	save("ci-smoke", false, `{"baseline":{"count":10,"successCount":10},"failure":{"count":10,"successCount":2,"errorRate":0.8},"recoveryMs":2400,"conclusion":"System degraded significantly.","assertions":[{"name":"error_rate","pass":false,"detail":"error rate 80%"}]}`)
+	save("payment-latency", true, `{"baseline":{"count":10,"successCount":10},"failure":{"count":10,"successCount":0,"errorRate":1},"recoveryMs":100,"conclusion":"System degraded significantly.","assertions":[{"name":"error_rate","pass":false,"detail":"error rate 100%"}]}`)
+	srv := &Server{Store: db, Runner: &experiment.Runner{Store: db}}
+	req := httptest.NewRequest(http.MethodGet, "/api/history", nil)
+	rec := httptest.NewRecorder()
+	srv.history(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		History []struct {
+			Name     string `json:"name"`
+			PassText string `json:"passText"`
+			Judged   int    `json:"judged"`
+			KnownBad []struct {
+				ID int64 `json:"id"`
+			} `json:"knownBad"`
+			Recovery []struct {
+				RecoveryMs *int64 `json:"recoveryMs"`
+			} `json:"recovery"`
+		} `json:"history"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.History) != 2 || body.History[0].PassText != "1/2" || len(body.History[0].Recovery) != 2 {
+		t.Fatalf("history = %#v", body.History)
+	}
+	if body.History[1].Name != "payment-latency" || body.History[1].Judged != 0 || len(body.History[1].KnownBad) != 1 {
+		t.Fatalf("known bad = %#v", body.History[1])
+	}
+}

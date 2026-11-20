@@ -47,6 +47,17 @@ type Result = {
   retryFactor: number;
   text: string;
 };
+type HistoryRun = { id: number; recoveryMs: number | null; details?: string[] };
+type NameHistory = {
+  name: string;
+  judged: number;
+  passed: number;
+  passText: string;
+  trend: string;
+  recovery: HistoryRun[];
+  failed: HistoryRun[];
+  knownBad: HistoryRun[];
+};
 type CompareDelta = {
   sameName: boolean;
   leftName: string;
@@ -88,6 +99,7 @@ export default function Page() {
   const [compareLeft, setCompareLeft] = useState("");
   const [compareRight, setCompareRight] = useState("");
   const [comparison, setComparison] = useState<{ left: Snapshot; right: Snapshot; delta?: CompareDelta } | null>(null);
+  const [history, setHistory] = useState<NameHistory[]>([]);
   const [baselineS, setBaselineS] = useState(15);
   const [durationS, setDurationS] = useState(30);
   const [recoveryS, setRecoveryS] = useState(15);
@@ -114,6 +126,13 @@ export default function Page() {
       .then((body) => setSuggestions(body.suggestions ?? []))
       .catch(() => undefined);
   }, [load]);
+
+  useEffect(() => {
+    fetch(`${API}/api/history`)
+      .then((res) => (res.ok ? res.json() : { history: [] }))
+      .then((body) => setHistory(body.history ?? []))
+      .catch(() => undefined);
+  }, [snap.experiment?.id, snap.experiment?.status]);
 
   const running = snap.experiment?.status === "running";
   const experimentId = snap.experiment?.id;
@@ -300,6 +319,10 @@ export default function Page() {
             ) : null}
           </div>
           <div className="panel">
+            <h2>History</h2>
+            <HistoryList items={history} />
+          </div>
+          <div className="panel">
             <h2>Service graph</h2>
             <ServiceGraph services={services} states={snap.nodeStates ?? {}} fault={faultVisible ? snap.experiment?.target : undefined} />
           </div>
@@ -467,6 +490,36 @@ function Timeline({ events, startedAt }: { events: EventRow[]; startedAt?: strin
   );
 }
 
+function HistoryList({ items }: { items: NameHistory[] }) {
+  if (!items.length) return <p className="warn">Completed runs show a pass rate and recovery times here.</p>;
+  return (
+    <div>
+      {items.map((item) => {
+        const recovery = item.recovery ?? [];
+        const failed = item.failed ?? [];
+        const knownBad = item.knownBad ?? [];
+        return (
+          <article key={item.name}>
+            <h3>{item.name}</h3>
+            {item.judged === 0 && knownBad.length ? <p>known bad, not in the pass rate</p> : <p>pass rate {item.passText}</p>}
+            {item.judged > 0 && knownBad.length ? <p>known bad, not in the pass rate</p> : null}
+            {recovery.map((point) => (
+              <p key={point.id}>recovery #{String(point.id).padStart(3, "0")} {point.recoveryMs === null ? "not observed" : `${(point.recoveryMs / 1000).toFixed(1)}s`}</p>
+            ))}
+            <p>{item.trend}</p>
+            {failed.flatMap((run) => (run.details?.length ? run.details : ["assertion failed"]).map((detail) => (
+              <p key={`${run.id}-${detail}`}>#{String(run.id).padStart(3, "0")} {detail}</p>
+            )))}
+            {knownBad.flatMap((run) => (run.details?.length ? run.details : ["assertion failed"]).map((detail) => (
+              <p key={`bad-${run.id}-${detail}`}>#{String(run.id).padStart(3, "0")} {detail}</p>
+            )))}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 function CompareRuns({ left, right, delta }: { left: Snapshot; right: Snapshot; delta?: CompareDelta }) {
   const leftResult = left.result;
   const rightResult = right.result;
@@ -526,7 +579,8 @@ function Report({ result }: { result: Result | null }) {
   );
 }
 
-function WindowCard({ title, window }: { title: string; window: Window }) {
+function WindowCard({ title, window }: { title: string; window?: Window }) {
+  if (!window) return null;
   return (
     <article>
       <h3>{title}</h3>
